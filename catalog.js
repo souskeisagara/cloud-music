@@ -9,6 +9,10 @@ import {
   mapPlaylistItem,
   mapSongItem,
   positiveID,
+  sessionCacheGet,
+  sessionCacheGetJSON,
+  sessionCacheSet,
+  sessionCacheSetJSON,
   squareCover,
   text,
 } from "./api.js";
@@ -27,17 +31,40 @@ function rememberPrivilege(songID, priv) {
     if (oldest !== undefined) songPrivilegeCache.delete(oldest);
   }
   songPrivilegeCache.set(songID, priv);
+  sessionCacheSetJSON(`priv:${songID}`, priv, 600);
 }
 
 export function cachedSongPrivilege(songID) {
-  return songPrivilegeCache.get(positiveID(songID)) || null;
+  const id = positiveID(songID);
+  if (!id) return null;
+  const local = songPrivilegeCache.get(id);
+  if (local) return local;
+  const hit = sessionCacheGetJSON(`priv:${id}`);
+  if (hit && typeof hit === "object") {
+    songPrivilegeCache.set(id, hit);
+    return hit;
+  }
+  return null;
+}
+
+function getCachedArtistAvatar(id) {
+  if (artistAvatarCache.has(id)) {
+    return { hit: true, url: artistAvatarCache.get(id) || "" };
+  }
+  const shared = sessionCacheGet(`av:${id}`);
+  if (shared !== undefined) {
+    artistAvatarCache.set(id, shared);
+    return { hit: true, url: shared };
+  }
+  return { hit: false, url: "" };
 }
 
 export async function fetchArtistAvatar(artistID) {
   const id = positiveID(artistID);
   if (!id) return undefined;
-  if (artistAvatarCache.has(id)) {
-    return artistAvatarCache.get(id) || undefined;
+  const cached = getCachedArtistAvatar(id);
+  if (cached.hit) {
+    return cached.url || undefined;
   }
   let resolved = "";
   try {
@@ -49,6 +76,7 @@ export async function fetchArtistAvatar(artistID) {
     if (firstKey !== undefined) artistAvatarCache.delete(firstKey);
   }
   artistAvatarCache.set(id, resolved);
+  sessionCacheSet(`av:${id}`, resolved, resolved ? 1800 : 300);
   return resolved || undefined;
 }
 
@@ -59,9 +87,9 @@ export async function hydrateItemsArtistAvatars(items, concurrency = 8) {
     const cr = items[i]?.creator;
     const aid = positiveID(cr?.id);
     if (!aid || cr.avatarURL) continue;
-    if (artistAvatarCache.has(aid)) {
-      const hit = artistAvatarCache.get(aid);
-      if (hit) cr.avatarURL = hit;
+    const cached = getCachedArtistAvatar(aid);
+    if (cached.hit) {
+      if (cached.url) cr.avatarURL = cached.url;
       continue;
     }
     missingSet.add(aid);
@@ -75,8 +103,8 @@ export async function hydrateItemsArtistAvatars(items, concurrency = 8) {
     const cr = items[i]?.creator;
     const aid = positiveID(cr?.id);
     if (!aid || cr.avatarURL) continue;
-    const hit = artistAvatarCache.get(aid);
-    if (hit) cr.avatarURL = hit;
+    const cached = getCachedArtistAvatar(aid);
+    if (cached.url) cr.avatarURL = cached.url;
   }
   return items;
 }
@@ -88,9 +116,9 @@ export async function hydrateCreatorsAvatars(creators, concurrency = 8) {
     const cr = creators[i]?.creator;
     const aid = positiveID(cr?.id);
     if (!aid || cr.avatarURL) continue;
-    if (artistAvatarCache.has(aid)) {
-      const hit = artistAvatarCache.get(aid);
-      if (hit) cr.avatarURL = hit;
+    const cached = getCachedArtistAvatar(aid);
+    if (cached.hit) {
+      if (cached.url) cr.avatarURL = cached.url;
       continue;
     }
     missingSet.add(aid);
@@ -104,8 +132,8 @@ export async function hydrateCreatorsAvatars(creators, concurrency = 8) {
     const cr = creators[i]?.creator;
     const aid = positiveID(cr?.id);
     if (!aid || cr.avatarURL) continue;
-    const hit = artistAvatarCache.get(aid);
-    if (hit) cr.avatarURL = hit;
+    const cached = getCachedArtistAvatar(aid);
+    if (cached.url) cr.avatarURL = cached.url;
   }
   return creators;
 }

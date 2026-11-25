@@ -3,9 +3,14 @@
 export const MUSIC_ORIGIN = "https://music.163.com";
 export const MUSIC_REFERER = "https://music.163.com/";
 export const EAPI_HOST = "https://interface.music.163.com";
+export const CLIENTLOG_HOST = "https://clientlog.music.163.com";
 export const APP_VER = "3.1.17.204416";
+export const OSX_APP_VER = "3.1.10.5100";
+export const OSX_OS_VER = "15.5";
 export const DESKTOP_UA =
   "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/3.1.29.205117";
+export const OSX_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 export const WEB_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
@@ -105,9 +110,54 @@ export function mediaHeaders() {
   };
 }
 
+export function sessionCacheGet(key) {
+  try {
+    if (typeof host !== "undefined" && host.cache && typeof host.cache.get === "function") {
+      return host.cache.get(key);
+    }
+  } catch (_) {}
+  return undefined;
+}
+
+export function sessionCacheSet(key, value, ttlSec = 0) {
+  try {
+    if (typeof host !== "undefined" && host.cache && typeof host.cache.set === "function") {
+      host.cache.set(key, String(value), ttlSec);
+    }
+  } catch (_) {}
+}
+
+export function sessionCacheDelete(key) {
+  try {
+    if (typeof host !== "undefined" && host.cache && typeof host.cache.delete === "function") {
+      host.cache.delete(key);
+    }
+  } catch (_) {}
+}
+
+export function sessionCacheGetJSON(key) {
+  const raw = sessionCacheGet(key);
+  if (typeof raw !== "string" || !raw) return undefined;
+  try {
+    return JSON.parse(raw);
+  } catch (_) {
+    return undefined;
+  }
+}
+
+export function sessionCacheSetJSON(key, value, ttlSec = 0) {
+  try {
+    sessionCacheSet(key, JSON.stringify(value), ttlSec);
+  } catch (_) {}
+}
+
 export function encryptEAPI(apiPath, payload) {
   const body = Object.assign({ e_r: false }, payload || {});
-  const payloadStr = JSON.stringify(body);
+  return encryptEAPIRaw(apiPath, body);
+}
+
+export function encryptEAPIRaw(apiPath, bodyObj) {
+  const payloadStr = JSON.stringify(bodyObj || {});
   const digest = host.crypto.md5(`nobody${apiPath}use${payloadStr}md5forencrypt`);
   const message = `${apiPath}-36cd479b6b5-${payloadStr}-36cd479b6b5-${digest}`;
   const params = host.crypto
@@ -189,6 +239,7 @@ export async function eapiRequest(apiPath, payload = {}, opts = {}) {
       os: "pc",
       appver: APP_VER,
       versioncode: "140",
+      mobilename: "",
       buildver: String(Math.floor(nowMs / 1000)),
       resolution: "1920x1080",
       __csrf: text(opts.csrf),
@@ -197,7 +248,7 @@ export async function eapiRequest(apiPath, payload = {}, opts = {}) {
     },
     opts.header || {}
   );
-  const bodyObj = Object.assign({ header: JSON.stringify(headerPayload) }, payload);
+  const bodyObj = Object.assign({ header: headerPayload }, payload);
   const { params } = encryptEAPI(apiPath, bodyObj);
 
   let resp;
@@ -225,6 +276,65 @@ export async function eapiRequest(apiPath, payload = {}, opts = {}) {
   }
   const checked = checkAPIResponse(resp, body, opts.allowCodes);
   return opts.withResponse ? { body: checked, response: resp } : checked;
+}
+
+// Client-log EAPI POST aligned to NetEase's macOS (os=osx) weblog contract:
+// clientlog.music.163.com/eapi/feedback/weblog with os=osx, appver=3.1.10.5100,
+// osver=15.5, header as a JSON object carrying MUSIC_U, Mac Chrome UA, and no Referer.
+export async function eapiClientLog(apiPath, payload = {}, secret = null) {
+  const eapiPath = apiPath.startsWith("/api/") ? "/eapi/" + apiPath.slice(5) : apiPath;
+  const url = CLIENTLOG_HOST + eapiPath;
+  const nowMs = Date.now();
+  const header = {
+    osver: OSX_OS_VER,
+    deviceId: getDeviceID(),
+    os: "osx",
+    appver: OSX_APP_VER,
+    versioncode: "140",
+    mobilename: "",
+    buildver: String(Math.floor(nowMs / 1000)),
+    resolution: "1920x1080",
+    __csrf: text(secret?.csrf),
+    channel: "netease",
+    requestId: `${nowMs}_${String(Math.floor(Math.random() * 1000)).padStart(4, "0")}`,
+  };
+  const musicU = text(secret?.musicU);
+  if (musicU) {
+    header.MUSIC_U = musicU;
+  }
+  const bodyObj = Object.assign({}, payload, { e_r: false, header });
+  const { params } = encryptEAPIRaw(apiPath, bodyObj);
+
+  let resp;
+  try {
+    const dynamicCookie = [
+      `deviceId=${encodeURIComponent(header.deviceId)}`,
+      `versioncode=${encodeURIComponent(header.versioncode)}`,
+      `mobilename=`,
+      `buildver=${encodeURIComponent(header.buildver)}`,
+      `resolution=${encodeURIComponent(header.resolution)}`,
+      `requestId=${encodeURIComponent(header.requestId)}`,
+    ].join("; ");
+    resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": OSX_UA,
+        Cookie: dynamicCookie,
+      },
+      body: formEncode({ params }),
+    });
+  } catch (err) {
+    throw { code: "network", message: String((err && err.message) || err || "Network error") };
+  }
+
+  let body;
+  try {
+    body = await resp.json();
+  } catch (_) {
+    throw { code: "plugin", message: "Failed to parse clientlog JSON" };
+  }
+  return checkAPIResponse(resp, body);
 }
 
 export async function weapiRequest(weapiPath, payload = {}, opts = {}) {

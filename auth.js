@@ -1,8 +1,9 @@
 // Official QR-code sign-in, session restoration, and sign-out.
 
 import {
-  APP_VER,
   MUSIC_ORIGIN,
+  OSX_APP_VER,
+  OSX_OS_VER,
   avatarCover,
   collectSetCookies,
   eapiRequest,
@@ -156,13 +157,14 @@ async function fetchUserAccount(cookieMap, csrf = "") {
 }
 
 function finalizeCookieHeaders(cookieMap) {
-  const finalHeaders = Object.keys(cookieMap).map((k) => cookieMap[k]);
-  if (!cookieMap.os) {
-    finalHeaders.push("os=pc; Domain=.music.163.com; Path=/; Secure");
-  }
-  if (!cookieMap.appver) {
-    finalHeaders.push(`appver=${APP_VER}; Domain=.music.163.com; Path=/; Secure`);
-  }
+  const reserved = new Set(["os", "appver", "osver", "channel"]);
+  const finalHeaders = Object.keys(cookieMap)
+    .filter((k) => !reserved.has(k))
+    .map((k) => cookieMap[k]);
+  finalHeaders.push("os=osx; Domain=.music.163.com; Path=/; Secure");
+  finalHeaders.push(`appver=${OSX_APP_VER}; Domain=.music.163.com; Path=/; Secure`);
+  finalHeaders.push(`osver=${OSX_OS_VER}; Domain=.music.163.com; Path=/; Secure`);
+  finalHeaders.push("channel=netease; Domain=.music.163.com; Path=/; Secure");
   return finalHeaders;
 }
 
@@ -203,6 +205,7 @@ export async function pollSignIn(req) {
   const csrf = extractCookieValue(cookieMap, "__csrf");
   const { profile, accountInfo } = await fetchUserAccount(cookieMap, csrf);
   const resolvedCSRF = extractCookieValue(cookieMap, "__csrf") || csrf;
+  const musicU = extractCookieValue(cookieMap, "MUSIC_U");
   const vipData = await fetchVIPInfo(resolvedCSRF);
   const finalHeaders = finalizeCookieHeaders(cookieMap);
   const account = buildAccount(profile, accountInfo, vipData, null);
@@ -214,6 +217,7 @@ export async function pollSignIn(req) {
       name: account.name,
       avatarURL: account.avatarURL || "",
       csrf: resolvedCSRF,
+      musicU,
     },
     cookies: [{ url: MUSIC_ORIGIN, headers: finalHeaders }],
   };
@@ -223,6 +227,7 @@ export async function restoreAccount(secret) {
   const cookieMap = {};
   const { profile, accountInfo } = await fetchUserAccount(cookieMap, text(secret?.csrf));
   const csrf = extractCookieValue(cookieMap, "__csrf") || text(secret?.csrf);
+  const musicU = extractCookieValue(cookieMap, "MUSIC_U") || text(secret?.musicU);
   const vipData = await fetchVIPInfo(csrf);
   const account = buildAccount(profile, accountInfo, vipData, secret);
   const out = {
@@ -232,6 +237,7 @@ export async function restoreAccount(secret) {
       name: account.name,
       avatarURL: account.avatarURL || "",
       csrf,
+      musicU,
     },
   };
   if (cookieMap.MUSIC_U) {

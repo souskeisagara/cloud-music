@@ -7,6 +7,9 @@ import {
   mapAlbumItem,
   mapSongItem,
   positiveID,
+  sessionCacheDelete,
+  sessionCacheGetJSON,
+  sessionCacheSetJSON,
   squareCover,
   text,
   weapiRequest,
@@ -14,11 +17,13 @@ import {
 import { t } from "./i18n.js";
 
 const SUPPORTED_TABS = ["videos", "collections", "about"];
+const FOLLOWED_CACHE_KEY = "followed:artists";
 
 let followedCache = { at: 0, ids: new Set() };
 
 export function invalidateFollowedArtists() {
   followedCache = { at: 0, ids: new Set() };
+  sessionCacheDelete(FOLLOWED_CACHE_KEY);
 }
 
 async function fetchSubbedArtistsRaw(limit, offset, csrf = "") {
@@ -36,6 +41,12 @@ export async function readFollowedArtistSet(csrf = "") {
   if (followedCache.at > 0 && now - followedCache.at < 60_000) {
     return followedCache.ids;
   }
+  const shared = sessionCacheGetJSON(FOLLOWED_CACHE_KEY);
+  if (Array.isArray(shared)) {
+    const ids = new Set(shared);
+    followedCache = { at: now, ids };
+    return ids;
+  }
   try {
     const body = await fetchSubbedArtistsRaw(200, 0, csrf);
     const rows = Array.isArray(body?.data) ? body.data : [];
@@ -45,6 +56,7 @@ export async function readFollowedArtistSet(csrf = "") {
       if (id) next.add(id);
     }
     followedCache = { at: now, ids: next };
+    sessionCacheSetJSON(FOLLOWED_CACHE_KEY, Array.from(next), 60);
     return next;
   } catch (_) {
     return followedCache.ids;
@@ -62,12 +74,7 @@ export async function followArtistByID(artistID, enabled, secret) {
   } catch (err) {
     await weapiRequest(weapiPath, payload, { csrf: text(secret?.csrf) });
   }
-  if (followedCache.at > 0) {
-    if (enabled) followedCache.ids.add(id);
-    else followedCache.ids.delete(id);
-  } else {
-    invalidateFollowedArtists();
-  }
+  invalidateFollowedArtists();
   return { following: Boolean(enabled) };
 }
 

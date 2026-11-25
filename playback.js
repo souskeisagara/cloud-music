@@ -1,13 +1,21 @@
 // Audio & MV stream resolution (with VIP quality locks, MediaKind switching),
 // bilingual LRC lyrics with preview-offset alignment, and cloud playback scrobbling.
 
-import { eapiRequest, mapSongItem, mediaHeaders, normalizeHTTPS, positiveID, text, weapiRequest } from "./api.js";
+import {
+  eapiClientLog,
+  eapiRequest,
+  mapSongItem,
+  mediaHeaders,
+  normalizeHTTPS,
+  positiveID,
+  sessionCacheGet,
+  sessionCacheGetJSON,
+  sessionCacheSet,
+  sessionCacheSetJSON,
+  text,
+} from "./api.js";
 import { cachedSongPrivilege, fetchPlaylistTracks, fetchSongsByIDs } from "./catalog.js";
 import { t } from "./i18n.js";
-
-const CLIENTLOG_HOST = "https://clientlog.music.163.com";
-const SONG_SOURCE_KEY = "ncm_song_source";
-const STARTPLAY_LAST_KEY = "ncm_startplay_last";
 
 const AUDIO_LEVELS = [
   { id: "hires", labelKey: "qualityHires", rank: 4 },
@@ -17,65 +25,32 @@ const AUDIO_LEVELS = [
 ];
 
 const songMetaCache = new Map();
-const songSourceCache = new Map();
 const mvDetailCache = new Map();
 
 function saveSongSource(songID, sourceID, sourceType) {
   if (!songID || !sourceID) return;
-  const entry = { sourceID, sourceType: sourceType || "list" };
-  cacheSet(songSourceCache, songID, entry, 64);
-  try {
-    if (typeof host === "undefined" || !host.storage || typeof host.storage.set !== "function") return;
-    let map = {};
-    try {
-      const raw = typeof host.storage.get === "function" ? host.storage.get(SONG_SOURCE_KEY) : "";
-      if (raw) map = JSON.parse(raw) || {};
-    } catch (_) {
-      map = {};
-    }
-    delete map[songID];
-    map[songID] = entry;
-    const keys = Object.keys(map);
-    while (keys.length > 16) {
-      delete map[keys.shift()];
-    }
-    host.storage.set(SONG_SOURCE_KEY, JSON.stringify(map));
-  } catch (_) {}
+  sessionCacheSetJSON(`src:${songID}`, { sourceID, sourceType: sourceType || "list" }, 3600);
 }
 
 function loadSongSource(songID) {
   if (!songID) return null;
-  const cached = songSourceCache.get(songID);
-  if (cached) return cached;
-  try {
-    if (typeof host === "undefined" || !host.storage || typeof host.storage.get !== "function") return null;
-    const raw = host.storage.get(SONG_SOURCE_KEY);
-    if (!raw) return null;
-    const map = JSON.parse(raw);
-    if (map && map[songID] && map[songID].sourceID) {
-      return map[songID];
-    }
-  } catch (_) {}
-  return null;
+  const hit = sessionCacheGetJSON(`src:${songID}`);
+  return hit && hit.sourceID ? hit : null;
 }
 
-function hasRecentStartPlay(songID, now) {
-  try {
-    if (typeof host === "undefined" || !host.storage || typeof host.storage.get !== "function") return false;
-    const raw = text(host.storage.get(STARTPLAY_LAST_KEY));
-    if (!raw) return false;
-    const [lastID, lastAtStr] = raw.split(":");
-    const lastAt = Number(lastAtStr || 0);
-    return lastID === songID && Number.isFinite(lastAt) && now - lastAt < 120_000;
-  } catch (_) {
-    return false;
-  }
+function hasRecentReport(kind, songID) {
+  return sessionCacheGet(`rpt:${kind}:${songID}`) === "1";
 }
 
-function markStartPlay(songID, now) {
+function markRecentReport(kind, songID, ttlSec) {
+  sessionCacheSet(`rpt:${kind}:${songID}`, "1", ttlSec);
+}
+
+function cleanupLegacyStorageKeys() {
   try {
-    if (typeof host !== "undefined" && host.storage && typeof host.storage.set === "function") {
-      host.storage.set(STARTPLAY_LAST_KEY, `${songID}:${now}`);
+    if (typeof host !== "undefined" && host.storage && typeof host.storage.delete === "function") {
+      host.storage.delete("ncm_song_source");
+      host.storage.delete("ncm_startplay_last");
     }
   } catch (_) {}
 }
@@ -117,8 +92,9 @@ function normalizeAudioLevel(raw) {
 }
 
 async function getSongMeta(songID) {
-  const cached = songMetaCache.get(songID);
+  const cached = songMetaCache.get(songID) || sessionCacheGetJSON(`meta:${songID}`);
   if (cached && cached.priv) {
+    cacheSet(songMetaCache, songID, cached, 256);
     return cached;
   }
   const songs = await fetchSongsByIDs([songID]).catch(() => []);
@@ -135,6 +111,7 @@ async function getSongMeta(songID) {
       mapped,
     };
     cacheSet(songMetaCache, songID, meta, 256);
+    sessionCacheSetJSON(`meta:${songID}`, meta, 900);
     return meta;
   }
   return cached || { mvid: "", albumID: "", dt: 0, fee: 0, priv, mapped: null };
@@ -187,92 +164,77 @@ export async function reportPlayback({ data, secret } = {}) {
   const songID = positiveID(partID) || (text(ref?.kind) === "video" ? positiveID(ref?.id) : "") || positiveID(data?.itemID);
   if (!songID) return {};
 
-  const csrf = text(secret?.csrf);
-  const meta = songMetaCache.get(songID) || (await getSongMeta(songID).catch(() => null));
+  cleanupLegacyStorageKeys();
+  const meta = await getSongMeta(songID).catch(() => null);
   const durationSec = meta?.dt > 0 ? Math.max(1, Math.round(meta.dt / 1000)) : 0;
   // When a track finishes naturally, the host resets seconds=0 with finished=true;
   // NetEase ignores playend logs with time=0, so always report the real track duration.
   const playedSec = finished ? durationSec || Math.max(rawSeconds, 180) : rawSeconds;
 
   let sourceID = "";
-  let sourceType = "";
   if (text(ref?.kind) === "series") {
     const [prefix, sid] = text(ref?.id).split(":");
-    if (prefix === "pl" && positiveID(sid)) {
+    if ((prefix === "pl" || prefix === "al") && positiveID(sid)) {
       sourceID = positiveID(sid);
-      sourceType = "list";
-    } else if (prefix === "al" && positiveID(sid)) {
-      sourceID = positiveID(sid);
-      sourceType = "album";
     }
   }
   if (!sourceID) {
     const cachedSrc = loadSongSource(songID);
     if (cachedSrc?.sourceID) {
       sourceID = cachedSrc.sourceID;
-      sourceType = cachedSrc.sourceType || "list";
     } else if (meta?.albumID) {
       sourceID = meta.albumID;
-      sourceType = "album";
     }
   }
 
-  const now = Date.now();
-  const entries = [];
-  // NetEase updates /api/play-record/song/list ("Recently Played") on startplay,
-  // and updates listening counts/rankings on play (end: "playend").
-  if (!hasRecentStartPlay(songID, now)) {
-    const startEntry = {
-      action: "startplay",
-      json: {
-        download: 0,
-        id: Number(songID),
-        sourceId: sourceID,
-        type: "song",
-        wifi: 0,
-        mainsite: "1",
+  const content = `id=${sourceID}`;
+
+  // 1) Independent startplay request -> populates /api/play-record/song/list ("Recently Played")
+  if (!hasRecentReport("startplay", songID)) {
+    const startLogs = JSON.stringify([
+      {
+        action: "startplay",
+        json: {
+          id: Number(songID),
+          type: "song",
+          mainsite: "1",
+          mainsiteWeb: "1",
+          content,
+        },
       },
-    };
-    if (sourceType) startEntry.json.source = sourceType;
-    if (sourceID) startEntry.json.content = `id=${sourceID}`;
-    entries.push(startEntry);
-    markStartPlay(songID, now);
+    ]);
+    await eapiClientLog("/api/feedback/weblog", { logs: startLogs }, secret).catch(() => null);
+    markRecentReport("startplay", songID, 120);
   }
 
-  if (finished || playedSec >= 5) {
-    const completed = finished || (durationSec > 0 && playedSec >= Math.round(durationSec * 0.8));
-    const playEntry = {
-      action: "play",
-      json: {
-        download: 0,
-        end: completed ? "playend" : "ui",
-        id: Number(songID),
-        sourceId: sourceID,
-        time: playedSec,
-        type: "song",
-        wifi: 0,
-        mainsite: 1,
+  // 2) Independent play/playend request -> increments listening count & rankings
+  const shouldReportPlay =
+    finished ||
+    (durationSec > 0 && playedSec >= Math.round(durationSec * 0.8)) ||
+    playedSec >= 30;
+  if (shouldReportPlay && (!hasRecentReport("play", songID) || finished)) {
+    const playLogs = JSON.stringify([
+      {
+        action: "play",
+        json: {
+          download: 0,
+          end: "playend",
+          id: Number(songID),
+          sourceId: sourceID,
+          time: playedSec,
+          type: "song",
+          wifi: 0,
+          source: "list",
+          mainsite: "1",
+          mainsiteWeb: "1",
+          content,
+        },
       },
-    };
-    if (sourceType) playEntry.json.source = sourceType;
-    if (sourceID) playEntry.json.content = `id=${sourceID}`;
-    entries.push(playEntry);
+    ]);
+    await eapiClientLog("/api/feedback/weblog", { logs: playLogs }, secret).catch(() => null);
+    markRecentReport("play", songID, 120);
   }
 
-  if (entries.length === 0) return {};
-  const logs = JSON.stringify(entries);
-
-  try {
-    await eapiRequest("/api/feedback/weblog", { logs }, { host: CLIENTLOG_HOST, csrf });
-    return {};
-  } catch (_) {}
-
-  try {
-    await eapiRequest("/api/feedback/weblog", { logs }, { csrf });
-    return {};
-  } catch (_) {}
-
-  await weapiRequest("/weapi/feedback/weblog", { logs }, { csrf }).catch(() => null);
   return {};
 }
 
@@ -331,7 +293,7 @@ async function resolveSongTarget(ref, partID) {
 }
 
 async function resolveMVPlan(mvid, songID, partID, episodes, requestedQuality) {
-  let cached = mvDetailCache.get(mvid);
+  let cached = mvDetailCache.get(mvid) || sessionCacheGetJSON(`mv:${mvid}`);
   if (!cached) {
     const detailRes = await eapiRequest("/api/v1/mv/detail", { id: Number(mvid) }).catch(() => null);
     const brs = Array.isArray(detailRes?.data?.brs) ? detailRes.data.brs : [];
@@ -344,6 +306,7 @@ async function resolveMVPlan(mvid, songID, partID, episodes, requestedQuality) {
       durationMs: Number(detailRes?.data?.duration || 0),
     };
     cacheSet(mvDetailCache, mvid, cached, 128);
+    sessionCacheSetJSON(`mv:${mvid}`, cached, 1800);
   }
   const resList = cached.resList;
   const wanted = Number(requestedQuality) || resList[0] || 1080;
