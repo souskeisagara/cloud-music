@@ -12,6 +12,7 @@ import {
   squareCover,
   text,
 } from "./api.js";
+import { followArtistByID, readFollowedArtistSet } from "./creator.js";
 import { t } from "./i18n.js";
 
 const ARTIST_AVATAR_CACHE_LIMIT = 512;
@@ -414,19 +415,25 @@ async function fetchSongDetail(songID, signedIn, secret) {
     }
     return { song, avatarURL };
   });
-  const [{ song, avatarURL }, commentRes, simiRes, likeRes] = await Promise.all([
+  const [{ song, avatarURL }, commentRes, simiRes, likeRes, followedSet] = await Promise.all([
     songWithAvatarJob,
     eapiRequest(`/api/v1/resource/comments/R_SO_4_${songID}`, { limit: 15, offset: 0 }).catch(() => null),
     eapiRequest("/api/v1/discovery/simiSong", { songid: Number(songID), limit: 12, offset: 0 }).catch(() => null),
     signedIn && positiveID(secret?.uid)
       ? eapiRequest("/api/song/like/get", { uid: Number(secret.uid) }).catch(() => null)
       : Promise.resolve(null),
+    signedIn ? readFollowedArtistSet() : Promise.resolve(null),
   ]);
   if (!song) throw { code: "expired" };
   const base = mapSongItem(song);
   if (!base) throw { code: "expired" };
-  if (base.creator && !base.creator.avatarURL && avatarURL) {
-    base.creator.avatarURL = avatarURL;
+  if (base.creator) {
+    if (!base.creator.avatarURL && avatarURL) {
+      base.creator.avatarURL = avatarURL;
+    }
+    if (followedSet && base.creator.id && followedSet.has(base.creator.id)) {
+      base.creator.following = true;
+    }
   }
 
   const likedIDs = Array.isArray(likeRes?.ids) ? likeRes.ids : [];
@@ -434,7 +441,18 @@ async function fetchSongDetail(songID, signedIn, secret) {
   const hotComments = (commentRes?.hotComments || []).map(mapComment).filter(Boolean);
   const recentComments = (commentRes?.comments || []).map(mapComment).filter(Boolean);
   const comments = hotComments.length > 0 ? hotComments : recentComments;
-  const related = (simiRes?.songs || []).map((s) => mapSongItem(s)).filter(Boolean);
+  let related = (simiRes?.songs || []).map((s) => mapSongItem(s)).filter(Boolean);
+  if (related.length === 0 && base.creator?.id && positiveID(base.creator.id)) {
+    const artistSongs = await eapiRequest("/api/v1/artist/songs", {
+      id: Number(base.creator.id),
+      order: "hot",
+      limit: 12,
+      offset: 0,
+    }).catch(() => null);
+    related = (artistSongs?.songs || [])
+      .map((s) => mapSongItem(s))
+      .filter((it) => it && it.ref.id !== songID);
+  }
   await hydrateItemsArtistAvatars(related);
 
   const descParts = [];
@@ -637,6 +655,15 @@ export async function editVideo({ ref, interaction, enabled, replyID, owner, sec
       time: 3,
     });
     return { liked: Boolean(enabled) };
+  }
+  if (interaction === "follow") {
+    if (target.type !== 0) throw { code: "unsupported" };
+    const songs = await fetchSongsByIDs([target.id]);
+    const song = songs[0];
+    const firstArtist = Array.isArray(song?.ar) ? song.ar[0] : Array.isArray(song?.artists) ? song.artists[0] : null;
+    const aid = positiveID(firstArtist?.id);
+    if (!aid) throw { code: "expired" };
+    return followArtistByID(aid, Boolean(enabled), secret);
   }
   if (interaction === "replyLike") {
     const cid = positiveID(replyID);

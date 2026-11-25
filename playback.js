@@ -1,9 +1,11 @@
 // Audio & MV stream resolution (with VIP quality locks, MediaKind switching),
-// bilingual LRC lyrics with preview-offset alignment, and recent-play progress reporting.
+// bilingual LRC lyrics with preview-offset alignment, and cloud playback scrobbling.
 
-import { eapiRequest, mapSongItem, mediaHeaders, normalizeHTTPS, positiveID, text } from "./api.js";
+import { eapiRequest, mapSongItem, mediaHeaders, normalizeHTTPS, positiveID, text, weapiRequest } from "./api.js";
 import { cachedSongPrivilege, fetchPlaylistTracks, fetchSongsByIDs } from "./catalog.js";
 import { t } from "./i18n.js";
+
+const CLIENTLOG_HOST = "https://clientlog.music.163.com";
 
 const AUDIO_LEVELS = [
   { id: "hires", labelKey: "qualityHires", rank: 4 },
@@ -12,11 +14,10 @@ const AUDIO_LEVELS = [
   { id: "standard", labelKey: "qualityStandard", rank: 1 },
 ];
 
-const HISTORY_STORAGE_KEY = "cloud_music_history_v1";
-const HISTORY_MAX_ITEMS = 32;
-
 const songMetaCache = new Map();
+const songSourceCache = new Map();
 const mvDetailCache = new Map();
+const scrobbleStateCache = new Map();
 
 function cacheSet(map, key, value, limit) {
   if (map.size >= limit && !map.has(key)) {
@@ -66,6 +67,7 @@ async function getSongMeta(songID) {
     const mapped = mapSongItem(song);
     const meta = {
       mvid: positiveID(song?.mv ?? song?.mvid),
+      albumID: positiveID(song?.al?.id ?? song?.album?.id),
       dt: Number(song?.dt || 0),
       fee: Number(song?.fee ?? priv?.fee ?? 0),
       priv,
@@ -74,7 +76,7 @@ async function getSongMeta(songID) {
     cacheSet(songMetaCache, songID, meta, 256);
     return meta;
   }
-  return cached || { mvid: "", dt: 0, fee: 0, priv, mapped: null };
+  return cached || { mvid: "", albumID: "", dt: 0, fee: 0, priv, mapped: null };
 }
 
 function audioContentType(typeRaw, url) {
@@ -116,120 +118,86 @@ function buildAudioQualities(priv, actualLevel, signedIn) {
   return { qualities: out, maxRank, playRank };
 }
 
-function readLocalHistoryRaw() {
-  if (typeof host === "undefined" || !host.storage || typeof host.storage.get !== "function") {
-    return [];
-  }
-  try {
-    const raw = host.storage.get(HISTORY_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (_) {
-    return [];
-  }
-}
-
-function writeLocalHistoryRaw(entries) {
-  if (typeof host === "undefined" || !host.storage || typeof host.storage.set !== "function") {
-    return;
-  }
-  try {
-    let trimmed = entries.slice(0, HISTORY_MAX_ITEMS);
-    let encoded = JSON.stringify(trimmed);
-    while (encoded.length > 6800 && trimmed.length > 1) {
-      trimmed = trimmed.slice(0, trimmed.length - 1);
-      encoded = JSON.stringify(trimmed);
-    }
-    host.storage.set(HISTORY_STORAGE_KEY, encoded);
-  } catch (_) {}
-}
-
-export function readLocalHistory() {
-  return readLocalHistoryRaw()
-    .map((e) => {
-      const id = positiveID(e?.id);
-      const title = text(e?.t);
-      if (!id || !title) return undefined;
-      const artistID = positiveID(e?.ai);
-      const artistName = text(e?.a);
-      const coverURL = normalizeHTTPS(e?.c) || undefined;
-      const dur = Number(e?.d) > 0 ? Math.round(Number(e.d)) : undefined;
-      const pos = Number(e?.p) > 0 ? Math.round(Number(e.p)) : undefined;
-      const finished = e?.f === true;
-      const item = {
-        ref: { kind: "video", id },
-        title,
-        subtitle: artistName || undefined,
-        creator: artistID && artistName ? { id: artistID, name: artistName } : undefined,
-        coverURL,
-        backdropURL: coverURL ? coverURL.replace("1024y1024", "2048y2048") : undefined,
-        durationSeconds: dur,
-      };
-      return {
-        id,
-        title,
-        subtitle: artistName || "",
-        coverURL,
-        durationSeconds: dur,
-        progressSeconds: finished ? undefined : pos,
-        finished,
-        ref: { kind: "video", id },
-        item,
-      };
-    })
-    .filter(Boolean);
-}
-
-function recordLocalPlay(songID, mapped, positionSeconds, durationSeconds, finished) {
-  if (!songID || !mapped?.title) return;
-  const list = readLocalHistoryRaw().filter((e) => positiveID(e?.id) !== songID);
-  const dur = Math.round(Number(durationSeconds || mapped.durationSeconds || 0));
-  const pos = Math.round(Number(positionSeconds || 0));
-  const done = Boolean(finished) || (dur > 0 && pos >= dur - 5);
-  list.unshift({
-    id: songID,
-    t: mapped.title.slice(0, 64),
-    a: text(mapped.creator?.name || mapped.subtitle).slice(0, 40),
-    ai: positiveID(mapped.creator?.id) || "",
-    c: mapped.coverURL || "",
-    d: dur > 0 ? dur : 0,
-    p: done ? 0 : Math.max(0, pos),
-    f: done,
-    ts: Math.floor(Date.now() / 1000),
-  });
-  writeLocalHistoryRaw(list);
-}
-
-export async function reportPlayback({ data } = {}) {
+export async function reportPlayback({ data, secret } = {}) {
   const ref = data?.ref;
   const partID = text(data?.partID);
-  const seconds = Math.max(0, Math.round(Number(data?.seconds || 0)));
+  const rawSeconds = Math.max(0, Math.round(Number(data?.seconds || 0)));
   const finished = Boolean(data?.finished);
   const songID = positiveID(partID) || (text(ref?.kind) === "video" ? positiveID(ref?.id) : "") || positiveID(data?.itemID);
   if (!songID) return {};
+
   const meta = songMetaCache.get(songID) || (await getSongMeta(songID).catch(() => null));
-  if (meta?.mapped) {
-    recordLocalPlay(songID, meta.mapped, seconds, meta.mapped.durationSeconds || 0, finished);
+  const durationSec = meta?.dt > 0 ? Math.max(1, Math.round(meta.dt / 1000)) : 0;
+  // When a track finishes naturally, the host resets seconds=0 with finished=true;
+  // NetEase ignores playend logs with time=0, so always report the real track duration.
+  const playedSec = finished ? durationSec || Math.max(rawSeconds, 180) : rawSeconds;
+  if (!finished && playedSec < 30) {
+    return {};
   }
-  if (finished || seconds >= 30) {
-    await eapiRequest("/api/feedback/weblog", {
-      logs: JSON.stringify([
-        {
-          action: "play",
-          json: {
-            download: 0,
-            end: finished ? "playend" : "interrupt",
-            id: Number(songID),
-            sourceId: "",
-            time: seconds,
-            type: "song",
-            wifi: 0,
-          },
-        },
-      ]),
-    }).catch(() => null);
+
+  const now = Date.now();
+  const prev = scrobbleStateCache.get(songID);
+  if (prev && now - prev.at < 90_000) {
+    if (prev.finished && finished) return {};
+    if (!finished && prev.reportedMid) return {};
   }
+  cacheSet(
+    scrobbleStateCache,
+    songID,
+    { at: now, finished: finished || Boolean(prev?.finished), reportedMid: true },
+    256
+  );
+
+  let sourceID = "";
+  let sourceType = "";
+  if (text(ref?.kind) === "series") {
+    const [prefix, sid] = text(ref?.id).split(":");
+    if (prefix === "pl" && positiveID(sid)) {
+      sourceID = positiveID(sid);
+      sourceType = "list";
+    } else if (prefix === "al" && positiveID(sid)) {
+      sourceID = positiveID(sid);
+      sourceType = "album";
+    }
+  }
+  if (!sourceID) {
+    const cachedSrc = songSourceCache.get(songID);
+    if (cachedSrc?.sourceID) {
+      sourceID = cachedSrc.sourceID;
+      sourceType = cachedSrc.sourceType || "list";
+    } else if (meta?.albumID) {
+      sourceID = meta.albumID;
+      sourceType = "album";
+    }
+  }
+
+  const logEntry = {
+    action: "play",
+    json: {
+      download: 0,
+      end: finished ? "playend" : "interrupt",
+      id: Number(songID),
+      sourceId: sourceID,
+      time: playedSec,
+      type: "song",
+      wifi: 0,
+      mainsite: 1,
+    },
+  };
+  if (sourceType) {
+    logEntry.json.source = sourceType;
+  }
+  if (sourceID) {
+    logEntry.json.content = `id=${sourceID}`;
+  }
+  const logs = JSON.stringify([logEntry]);
+
+  try {
+    await eapiRequest("/api/feedback/weblog", { logs }, { host: CLIENTLOG_HOST });
+    return {};
+  } catch (_) {}
+
+  await weapiRequest("/weapi/feedback/weblog", { logs }, { csrf: text(secret?.csrf) }).catch(() => null);
   return {};
 }
 
@@ -260,6 +228,7 @@ async function resolveSongTarget(ref, partID) {
         .filter(Boolean);
       const chosen = positiveID(partID) || episodes[0]?.partID;
       if (!chosen) throw { code: "expired" };
+      cacheSet(songSourceCache, chosen, { sourceID: id, sourceType: "list" }, 256);
       return { songID: chosen, partID: chosen, episodes };
     }
     if (prefix === "al" && positiveID(id)) {
@@ -279,6 +248,7 @@ async function resolveSongTarget(ref, partID) {
         .filter(Boolean);
       const chosen = positiveID(partID) || episodes[0]?.partID;
       if (!chosen) throw { code: "expired" };
+      cacheSet(songSourceCache, chosen, { sourceID: id, sourceType: "album" }, 256);
       return { songID: chosen, partID: chosen, episodes };
     }
   }
@@ -421,11 +391,6 @@ export async function resolvePlayback({
     } else if (gotRank > 0 && gotRank < reqRank) {
       restriction = signedIn || reqRank >= 3 ? "membership" : "login";
     }
-  }
-
-  // Record start in local recent history immediately so switching to Recently Played reflects it right away.
-  if (meta.mapped && !restriction) {
-    recordLocalPlay(songID, meta.mapped, 0, durationSec, false);
   }
 
   const trialInfo = entry?.freeTrialInfo;

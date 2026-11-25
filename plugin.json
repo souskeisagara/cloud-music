@@ -28,6 +28,7 @@
       "music.163.com",
       "interface.music.163.com",
       "interface3.music.163.com",
+      "clientlog.music.163.com",
       "*.music.126.net",
       "*.vod.126.net",
       "*.126.net"
@@ -47,6 +48,7 @@
     "sections": {
       "library": "My Music",
       "favorites": "Playlists",
+      "folderUnit": "Playlist",
       "history": "Recently Played",
       "guestTitle": "Your music library, always ready.",
       "guestNote": "Sign in to browse your playlists, favorites, and recently played tracks."
@@ -82,8 +84,12 @@
     "catalog.search",
     "catalog.searchSuggest",
     "catalog.creator",
+    "account.followCreator",
+    "catalog.following",
     "catalog.library",
     "account.favorites",
+    "account.editFavoriteFolders",
+    "account.videoFavorites",
     "account.history",
     "catalog.videoComments",
     "account.videoInteraction",
@@ -117,6 +123,7 @@
         "sections": {
           "library": "我的音乐",
           "favorites": "我的歌单",
+          "folderUnit": "歌单",
           "history": "最近播放",
           "guestTitle": "你的音乐库，随时接着听。",
           "guestNote": "登录后查看个人歌单、红心与最近播放。"
@@ -170,6 +177,7 @@
         "sections": {
           "library": "マイミュージック",
           "favorites": "プレイリスト",
+          "folderUnit": "プレイリスト",
           "history": "最近再生",
           "guestTitle": "あなたのライブラリを大画面で。",
           "guestNote": "サインインしてプレイリストや再生履歴を表示します。"
