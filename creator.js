@@ -1,0 +1,81 @@
+// Artist / creator profile, top songs, and albums.
+
+import {
+  avatarCover,
+  count,
+  eapiRequest,
+  mapAlbumItem,
+  mapSongItem,
+  positiveID,
+  squareCover,
+  text,
+} from "./api.js";
+import { t } from "./i18n.js";
+
+const SUPPORTED_TABS = ["videos", "collections", "about"];
+
+export async function readCreator({ creatorID, tab = "videos", cursor = "", includeProfile = true } = {}) {
+  const copy = t();
+  const artistID = positiveID(creatorID);
+  if (!artistID) throw { code: "permission" };
+
+  const activeTab = tab || "videos";
+  const page = Math.max(1, parseInt(String(cursor || "1"), 10) || 1);
+
+  const [artistBody, albumsBody] = await Promise.all([
+    includeProfile || activeTab === "videos" || activeTab === "about"
+      ? eapiRequest(`/api/v1/artist/${artistID}`, {})
+      : Promise.resolve(null),
+    activeTab === "collections"
+      ? eapiRequest(`/api/artist/albums/${artistID}`, {
+          limit: 20,
+          offset: (page - 1) * 20,
+          total: true,
+        })
+      : Promise.resolve(null),
+  ]);
+
+  const out = {};
+  if (includeProfile) {
+    const artist = artistBody?.artist;
+    const name = text(artist?.name);
+    if (!name) throw { code: "expired" };
+    out.profile = {
+      creator: {
+        id: artistID,
+        name,
+        avatarURL: avatarCover(artist?.img1v1Url || artist?.picUrl, 256),
+      },
+      backdropURL: squareCover(artist?.picUrl || artist?.img1v1Url, 1080),
+      bio: text(artist?.briefDesc) || copy.artistBioEmpty,
+      works: count(artist?.musicSize),
+      tabs: SUPPORTED_TABS,
+    };
+  }
+
+  if (activeTab === "collections") {
+    const rawAlbums = Array.isArray(albumsBody?.hotAlbums) ? albumsBody.hotAlbums : [];
+    out.collections = rawAlbums
+      .map((al) => {
+        const mapped = mapAlbumItem(al, copy.albumTag);
+        if (!mapped) return undefined;
+        return {
+          id: mapped.ref.id,
+          title: mapped.title,
+          description: text(al?.subType || al?.company) || undefined,
+          count: count(al?.size),
+          items: [mapped],
+        };
+      })
+      .filter(Boolean);
+    out.nextCursor = albumsBody?.more && rawAlbums.length > 0 ? String(page + 1) : "";
+    return out;
+  }
+
+  if (activeTab === "videos") {
+    const hotSongs = Array.isArray(artistBody?.hotSongs) ? artistBody.hotSongs : [];
+    out.items = page === 1 ? hotSongs.map((s) => mapSongItem(s)).filter(Boolean) : [];
+    out.nextCursor = "";
+  }
+  return out;
+}

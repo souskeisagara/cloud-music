@@ -1,0 +1,30 @@
+name: Release Plugin
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish (defaults to ref name)"
+        required: false
+        type: string
+      dry_run:
+        description: "Validate and package without publishing a GitHub Release"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: yuchanns/release-mikutv-plugin@v1
+        with:
+          tag: ${{ inputs.tag }}
+          dry-run: ${{ inputs.dry_run }}
