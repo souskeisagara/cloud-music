@@ -121,25 +121,35 @@ async function readHistory({ owner, secret }) {
     rows.push(row);
   };
 
+  const csrf = text(secret?.csrf);
   let cloudSongs = [];
-  try {
-    const recentRes = await eapiRequest("/api/record/recent/song", { limit: 60 });
-    const list = Array.isArray(recentRes?.data?.list) ? recentRes.data.list : [];
+  const collectRecent = (res) => {
+    const list = Array.isArray(res?.data?.list) ? res.data.list : [];
     for (let i = 0; i < list.length; i++) {
-      if (list[i]?.data) cloudSongs.push(list[i].data);
+      const song = list[i]?.data || list[i]?.song || list[i];
+      if (song && positiveID(song?.id)) cloudSongs.push(song);
     }
+  };
+  try {
+    collectRecent(await eapiRequest("/api/play-record/song/list", { limit: 100 }, { csrf }));
   } catch (_) {}
 
   if (cloudSongs.length === 0) {
     try {
-      const body = await eapiRequest("/api/v1/play/record", { uid: Number(uid), type: 1 });
+      collectRecent(await weapiRequest("/weapi/play-record/song/list", { limit: 100 }, { csrf }));
+    } catch (_) {}
+  }
+
+  if (cloudSongs.length === 0) {
+    try {
+      const body = await eapiRequest("/api/v1/play/record", { uid: Number(uid), type: 1 }, { csrf });
       const week = Array.isArray(body?.weekData) ? body.weekData : [];
       for (let i = 0; i < week.length; i++) cloudSongs.push(week[i]?.song || week[i]);
     } catch (_) {}
   }
   if (cloudSongs.length === 0) {
     try {
-      const body = await eapiRequest("/api/v1/play/record", { uid: Number(uid), type: 0 });
+      const body = await eapiRequest("/api/v1/play/record", { uid: Number(uid), type: 0 }, { csrf });
       const all = Array.isArray(body?.allData) ? body.allData : [];
       for (let i = 0; i < all.length; i++) cloudSongs.push(all[i]?.song || all[i]);
     } catch (_) {}

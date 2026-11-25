@@ -12,12 +12,28 @@ export const WEB_UA =
 const PLACEHOLDER_ARTIST_PIC_RE = /\/5639395138885805\.(?:jpg|png|webp)$/i;
 const COOKIE_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const COOKIE_VALUE_RE = /^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]+$/;
+const DEVICE_ID_KEY = "ncm_device_id";
 let cachedDeviceID = "";
 
 function getDeviceID() {
-  if (!cachedDeviceID) {
-    cachedDeviceID = host.crypto.randomBytes(16, "hex");
+  if (cachedDeviceID) {
+    return cachedDeviceID;
   }
+  try {
+    if (typeof host !== "undefined" && host.storage && typeof host.storage.get === "function") {
+      const stored = text(host.storage.get(DEVICE_ID_KEY));
+      if (stored && /^[0-9a-f]{32}$/i.test(stored)) {
+        cachedDeviceID = stored;
+        return cachedDeviceID;
+      }
+    }
+  } catch (_) {}
+  cachedDeviceID = host.crypto.randomBytes(16, "hex");
+  try {
+    if (typeof host !== "undefined" && host.storage && typeof host.storage.set === "function") {
+      host.storage.set(DEVICE_ID_KEY, cachedDeviceID);
+    }
+  } catch (_) {}
   return cachedDeviceID;
 }
 
@@ -175,12 +191,13 @@ export async function eapiRequest(apiPath, payload = {}, opts = {}) {
       versioncode: "140",
       buildver: String(Math.floor(nowMs / 1000)),
       resolution: "1920x1080",
+      __csrf: text(opts.csrf),
       channel: "netease",
       requestId: `${nowMs}_${String(Math.floor(Math.random() * 1000)).padStart(4, "0")}`,
     },
     opts.header || {}
   );
-  const bodyObj = Object.assign({ header: headerPayload }, payload);
+  const bodyObj = Object.assign({ header: JSON.stringify(headerPayload) }, payload);
   const { params } = encryptEAPI(apiPath, bodyObj);
 
   let resp;

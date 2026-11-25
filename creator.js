@@ -21,13 +21,23 @@ export function invalidateFollowedArtists() {
   followedCache = { at: 0, ids: new Set() };
 }
 
-export async function readFollowedArtistSet() {
+async function fetchSubbedArtistsRaw(limit, offset, csrf = "") {
+  const payload = { limit, offset, total: true };
+  try {
+    return await eapiRequest("/api/artist/sublist", payload, { csrf });
+  } catch (err) {
+    if (err && err.code === "signIn") throw err;
+    return weapiRequest("/weapi/artist/sublist", payload, { csrf });
+  }
+}
+
+export async function readFollowedArtistSet(csrf = "") {
   const now = Date.now();
   if (followedCache.at > 0 && now - followedCache.at < 60_000) {
     return followedCache.ids;
   }
   try {
-    const body = await eapiRequest("/api/artist/sublist", { limit: 200, offset: 0, total: true });
+    const body = await fetchSubbedArtistsRaw(200, 0, csrf);
     const rows = Array.isArray(body?.data) ? body.data : [];
     const next = new Set();
     for (let i = 0; i < rows.length; i++) {
@@ -159,22 +169,17 @@ export async function readCreator({ creatorID, tab = "videos", cursor = "", incl
   return out;
 }
 
-async function fetchSubbedArtistsPage(cursor) {
+async function fetchSubbedArtistsPage(cursor, csrf = "") {
   const page = Math.max(1, parseInt(String(cursor || "1"), 10) || 1);
   const limit = 30;
   const offset = (page - 1) * limit;
-  const body = await eapiRequest("/api/artist/sublist", { limit, offset, total: true });
+  const body = await fetchSubbedArtistsRaw(limit, offset, csrf);
   const list = Array.isArray(body?.data) ? body.data : [];
   const creators = list
     .map((ar) => {
       const id = positiveID(ar?.id);
       const name = text(ar?.name);
       if (!id || !name) return undefined;
-      const musicSize = count(ar?.musicSize);
-      const albumSize = count(ar?.albumSize);
-      const infoParts = [];
-      if (musicSize !== undefined) infoParts.push(`${musicSize}`);
-      if (albumSize !== undefined) infoParts.push(`${albumSize}`);
       return {
         creator: {
           id,
@@ -194,10 +199,15 @@ async function fetchSubbedArtistsPage(cursor) {
 }
 
 async function fetchFollowedArtistsSongs(creators) {
-  const sample = creators.slice(0, 6);
+  const sample = creators.slice(0, 4);
   if (sample.length === 0) return [];
-  const batches = await Promise.all(
-    sample.map(async (entry) => {
+  const batches = new Array(sample.length).fill(null).map(() => []);
+  let cursor = 0;
+  const concurrency = Math.min(2, sample.length);
+  async function worker() {
+    while (cursor < sample.length) {
+      const idx = cursor++;
+      const entry = sample[idx];
       const id = entry.creator.id;
       const av = entry.creator.avatarURL;
       const body = await eapiRequest("/api/v1/artist/songs", {
@@ -207,7 +217,7 @@ async function fetchFollowedArtistsSongs(creators) {
         offset: 0,
       }).catch(() => null);
       const songs = Array.isArray(body?.songs) ? body.songs : [];
-      return songs
+      batches[idx] = songs
         .map((s) => {
           const item = mapSongItem(s);
           if (item?.creator && item.creator.id === id && !item.creator.avatarURL && av) {
@@ -216,8 +226,9 @@ async function fetchFollowedArtistsSongs(creators) {
           return item;
         })
         .filter(Boolean);
-    })
-  );
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
   const updates = [];
   const seen = new Set();
   for (let slot = 0; slot < 5; slot++) {
@@ -231,22 +242,23 @@ async function fetchFollowedArtistsSongs(creators) {
   return updates;
 }
 
-export async function readFollowing({ section = "overview", cursor = "", owner } = {}) {
-  const uid = positiveID(owner);
+export async function readFollowing({ section = "overview", cursor = "", owner, secret } = {}) {
+  const uid = positiveID(owner || secret?.uid);
   if (!uid) throw { code: "signIn" };
+  const csrf = text(secret?.csrf);
   const target = section || "overview";
   if (target === "live") {
     return { liveRooms: [], liveCursor: "", supportsLive: false };
   }
   if (target === "creators") {
-    const res = await fetchSubbedArtistsPage(cursor);
+    const res = await fetchSubbedArtistsPage(cursor, csrf);
     return {
       creators: res.creators,
       creatorsCursor: res.creatorsCursor,
       supportsLive: false,
     };
   }
-  const creatorsRes = await fetchSubbedArtistsPage("");
+  const creatorsRes = await fetchSubbedArtistsPage("", csrf);
   if (target === "updates") {
     if (cursor) {
       return { updates: [], updatesCursor: "", supportsLive: false };
