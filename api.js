@@ -173,10 +173,11 @@ export function encryptEAPIRaw(apiPath, bodyObj) {
 
 export function encryptWeAPI(payload) {
   const plain = JSON.stringify(payload || {});
-  const rnd = host.crypto.randomBytes(16, "bytes");
+  const rndHex = host.crypto.randomBytes(16, "hex");
   let secretKey = "";
   for (let i = 0; i < 16; i++) {
-    secretKey += BASE62[rnd[i] % BASE62.length];
+    const byte = parseInt(rndHex.slice(i * 2, i * 2 + 2), 16);
+    secretKey += BASE62[byte % BASE62.length];
   }
   const pass1 = host.crypto.aesEncrypt({
     mode: "cbc",
@@ -248,6 +249,10 @@ export async function eapiRequest(apiPath, payload = {}, opts = {}) {
     },
     opts.header || {}
   );
+  const musicU = text(opts.musicU);
+  if (musicU && !headerPayload.MUSIC_U) {
+    headerPayload.MUSIC_U = musicU;
+  }
   const bodyObj = Object.assign({ header: headerPayload }, payload);
   const { params } = encryptEAPI(apiPath, bodyObj);
 

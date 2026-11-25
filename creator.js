@@ -26,17 +26,17 @@ export function invalidateFollowedArtists() {
   sessionCacheDelete(FOLLOWED_CACHE_KEY);
 }
 
-async function fetchSubbedArtistsRaw(limit, offset, csrf = "") {
+async function fetchSubbedArtistsRaw(limit, offset, csrf = "", musicU = "") {
   const payload = { limit, offset, total: true };
   try {
-    return await eapiRequest("/api/artist/sublist", payload, { csrf });
+    return await weapiRequest("/weapi/artist/sublist", payload, { csrf });
   } catch (err) {
     if (err && err.code === "signIn") throw err;
-    return weapiRequest("/weapi/artist/sublist", payload, { csrf });
+    return eapiRequest("/api/artist/sublist", payload, { csrf, musicU });
   }
 }
 
-export async function readFollowedArtistSet(csrf = "") {
+export async function readFollowedArtistSet(csrf = "", musicU = "") {
   const now = Date.now();
   if (followedCache.at > 0 && now - followedCache.at < 60_000) {
     return followedCache.ids;
@@ -48,7 +48,7 @@ export async function readFollowedArtistSet(csrf = "") {
     return ids;
   }
   try {
-    const body = await fetchSubbedArtistsRaw(200, 0, csrf);
+    const body = await fetchSubbedArtistsRaw(200, 0, csrf, musicU);
     const rows = Array.isArray(body?.data) ? body.data : [];
     const next = new Set();
     for (let i = 0; i < rows.length; i++) {
@@ -94,12 +94,16 @@ export async function readCreator({ creatorID, tab = "videos", cursor = "", incl
   const songPageSize = 30;
 
   const [artistBody, songsBody, albumsBody, followedSet] = await Promise.all([
-    includeProfile || activeTab === "about" || (activeTab === "videos" && page === 1)
-      ? eapiRequest(`/api/v1/artist/${artistID}`, {}).catch(() => null)
-      : Promise.resolve(null),
+    includeProfile
+      ? eapiRequest(`/api/v1/artist/${artistID}`, {})
+      : activeTab === "about" || (activeTab === "videos" && page === 1)
+        ? eapiRequest(`/api/v1/artist/${artistID}`, {}).catch(() => null)
+        : Promise.resolve(null),
     activeTab === "videos"
       ? eapiRequest("/api/v1/artist/songs", {
           id: Number(artistID),
+          private_cloud: "true",
+          work_type: 1,
           order: "hot",
           limit: songPageSize,
           offset: (page - 1) * songPageSize,
@@ -176,11 +180,11 @@ export async function readCreator({ creatorID, tab = "videos", cursor = "", incl
   return out;
 }
 
-async function fetchSubbedArtistsPage(cursor, csrf = "") {
+async function fetchSubbedArtistsPage(cursor, csrf = "", musicU = "") {
   const page = Math.max(1, parseInt(String(cursor || "1"), 10) || 1);
   const limit = 30;
   const offset = (page - 1) * limit;
-  const body = await fetchSubbedArtistsRaw(limit, offset, csrf);
+  const body = await fetchSubbedArtistsRaw(limit, offset, csrf, musicU);
   const list = Array.isArray(body?.data) ? body.data : [];
   const creators = list
     .map((ar) => {
@@ -217,13 +221,22 @@ async function fetchFollowedArtistsSongs(creators) {
       const entry = sample[idx];
       const id = entry.creator.id;
       const av = entry.creator.avatarURL;
-      const body = await eapiRequest("/api/v1/artist/songs", {
-        id: Number(id),
-        order: "time",
-        limit: 5,
-        offset: 0,
-      }).catch(() => null);
-      const songs = Array.isArray(body?.songs) ? body.songs : [];
+      const cacheKey = `artist:recent-songs:${id}`;
+      let songs = sessionCacheGetJSON(cacheKey);
+      if (!Array.isArray(songs)) {
+        const body = await eapiRequest("/api/v1/artist/songs", {
+          id: Number(id),
+          private_cloud: "true",
+          work_type: 1,
+          order: "time",
+          limit: 5,
+          offset: 0,
+        }).catch(() => null);
+        songs = Array.isArray(body?.songs) ? body.songs : [];
+        if (songs.length > 0) {
+          sessionCacheSetJSON(cacheKey, songs, 300);
+        }
+      }
       batches[idx] = songs
         .map((s) => {
           const item = mapSongItem(s);
@@ -253,19 +266,20 @@ export async function readFollowing({ section = "overview", cursor = "", owner, 
   const uid = positiveID(owner || secret?.uid);
   if (!uid) throw { code: "signIn" };
   const csrf = text(secret?.csrf);
+  const musicU = text(secret?.musicU);
   const target = section || "overview";
   if (target === "live") {
     return { liveRooms: [], liveCursor: "", supportsLive: false };
   }
   if (target === "creators") {
-    const res = await fetchSubbedArtistsPage(cursor, csrf);
+    const res = await fetchSubbedArtistsPage(cursor, csrf, musicU);
     return {
       creators: res.creators,
       creatorsCursor: res.creatorsCursor,
       supportsLive: false,
     };
   }
-  const creatorsRes = await fetchSubbedArtistsPage("", csrf);
+  const creatorsRes = await fetchSubbedArtistsPage("", csrf, musicU);
   if (target === "updates") {
     if (cursor) {
       return { updates: [], updatesCursor: "", supportsLive: false };
