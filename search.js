@@ -1,7 +1,7 @@
 // Search discovery, hot keywords, suggestions, and multi-kind search (songs, artists, playlists, albums).
 
 import {
-  avatarCover,
+  artistAvatar,
   count,
   eapiRequest,
   mapAlbumItem,
@@ -43,7 +43,7 @@ function mapArtistCreator(row) {
     creator: {
       id,
       name,
-      avatarURL: avatarCover(row?.img1v1Url || row?.picUrl, 192),
+      avatarURL: artistAvatar(row, 256),
     },
     description: alias || undefined,
     videos: count(row?.musicSize),

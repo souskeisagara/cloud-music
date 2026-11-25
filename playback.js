@@ -11,6 +11,35 @@ const AUDIO_LEVELS = [
   { id: "standard", labelKey: "qualityStandard", limit: "" },
 ];
 
+const songMetaCache = new Map();
+const mvDetailCache = new Map();
+
+function cacheSet(map, key, value, limit) {
+  if (map.size >= limit && !map.has(key)) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+  map.set(key, value);
+}
+
+async function getSongMeta(songID) {
+  if (songMetaCache.has(songID)) {
+    return songMetaCache.get(songID);
+  }
+  const songs = await fetchSongsByIDs([songID]).catch(() => []);
+  const song = songs[0] || null;
+  if (song) {
+    const meta = {
+      mvid: positiveID(song?.mv ?? song?.mvid),
+      dt: Number(song?.dt || 0),
+      fee: Number(song?.fee ?? 0),
+    };
+    cacheSet(songMetaCache, songID, meta, 256);
+    return meta;
+  }
+  return { mvid: "", dt: 0, fee: 0 };
+}
+
 function audioContentType(typeRaw, url) {
   const lower = text(typeRaw).toLowerCase();
   if (lower === "flac" || /\.flac(?:[?#]|$)/i.test(url)) return "audio/flac";
@@ -82,13 +111,21 @@ async function resolveSongTarget(ref, partID) {
 }
 
 async function resolveMVPlan(mvid, songID, partID, episodes, requestedQuality) {
-  const detailRes = await eapiRequest("/api/v1/mv/detail", { id: Number(mvid) }).catch(() => null);
-  const brs = Array.isArray(detailRes?.data?.brs) ? detailRes.data.brs : [];
-  const availableRes = brs
-    .map((b) => Number(b?.br))
-    .filter((n) => n >= 240)
-    .sort((a, b) => b - a);
-  const resList = availableRes.length > 0 ? availableRes : [1080, 720, 480];
+  let cached = mvDetailCache.get(mvid);
+  if (!cached) {
+    const detailRes = await eapiRequest("/api/v1/mv/detail", { id: Number(mvid) }).catch(() => null);
+    const brs = Array.isArray(detailRes?.data?.brs) ? detailRes.data.brs : [];
+    const availableRes = brs
+      .map((b) => Number(b?.br))
+      .filter((n) => n >= 240)
+      .sort((a, b) => b - a);
+    cached = {
+      resList: availableRes.length > 0 ? availableRes : [1080, 720, 480],
+      durationMs: Number(detailRes?.data?.duration || 0),
+    };
+    cacheSet(mvDetailCache, mvid, cached, 128);
+  }
+  const resList = cached.resList;
   const wanted = Number(requestedQuality) || resList[0] || 1080;
   const chosenRes = resList.includes(wanted) ? wanted : resList[0];
 
@@ -101,7 +138,7 @@ async function resolveMVPlan(mvid, songID, partID, episodes, requestedQuality) {
     throw { code: "expired", message: "MV stream unavailable." };
   }
   const qualities = resList.map((r) => ({ id: String(r), label: `${r}P` }));
-  const durationMs = Number(detailRes?.data?.duration || 0);
+  const durationMs = cached.durationMs;
   return {
     itemID: songID,
     partID,
@@ -133,9 +170,8 @@ export async function resolvePlayback({
   const copy = t();
   const target = await resolveSongTarget(ref, partID);
   const songID = target.songID;
-  const songs = await fetchSongsByIDs([songID]).catch(() => []);
-  const song = songs[0];
-  const mvid = positiveID(song?.mv ?? song?.mvid);
+  const meta = await getSongMeta(songID);
+  const mvid = meta.mvid;
   const availableKinds = mvid ? ["audio", "video"] : undefined;
 
   if (mediaKind === "video" && mvid) {
@@ -171,12 +207,12 @@ export async function resolvePlayback({
   const durationSec =
     Number(entry?.time || 0) > 0
       ? Number(entry.time) / 1000
-      : Number(song?.dt || 0) > 0
-        ? Number(song.dt) / 1000
+      : meta.dt > 0
+        ? meta.dt / 1000
         : 0;
 
   if (!streamURL) {
-    const fee = Number(song?.fee ?? entry?.fee ?? 0);
+    const fee = Number(meta.fee || entry?.fee || 0);
     const restriction = fee === 4 ? "purchase" : fee === 1 ? "membership" : "source";
     return {
       itemID: songID,

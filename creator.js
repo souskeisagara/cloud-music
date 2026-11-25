@@ -1,7 +1,7 @@
 // Artist / creator profile, top songs, and albums.
 
 import {
-  avatarCover,
+  artistAvatar,
   count,
   eapiRequest,
   mapAlbumItem,
@@ -44,9 +44,9 @@ export async function readCreator({ creatorID, tab = "videos", cursor = "", incl
       creator: {
         id: artistID,
         name,
-        avatarURL: avatarCover(artist?.img1v1Url || artist?.picUrl, 256),
+        avatarURL: artistAvatar(artist, 256),
       },
-      backdropURL: squareCover(artist?.picUrl || artist?.img1v1Url, 1080),
+      backdropURL: squareCover(artist?.picUrl || artist?.img1v1Url, 2048),
       bio: text(artist?.briefDesc) || copy.artistBioEmpty,
       works: count(artist?.musicSize),
       tabs: SUPPORTED_TABS,

@@ -2,9 +2,24 @@
 
 export const MUSIC_ORIGIN = "https://music.163.com";
 export const MUSIC_REFERER = "https://music.163.com/";
-export const EAPI_HOST = "https://interface3.music.163.com";
+export const EAPI_HOST = "https://interface.music.163.com";
+export const APP_VER = "3.1.17.204416";
+export const DESKTOP_UA =
+  "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/3.1.29.205117";
 export const WEB_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
+const PLACEHOLDER_ARTIST_PIC_RE = /\/5639395138885805\.(?:jpg|png|webp)$/i;
+const COOKIE_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const COOKIE_VALUE_RE = /^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]+$/;
+let cachedDeviceID = "";
+
+function getDeviceID() {
+  if (!cachedDeviceID) {
+    cachedDeviceID = host.crypto.randomBytes(16, "hex");
+  }
+  return cachedDeviceID;
+}
 
 const EAPI_KEY = "e82ckenh8dichen8";
 const WEAPI_PRESET_KEY = "0CoJUm6Qyw8W8jud";
@@ -37,15 +52,34 @@ export function normalizeHTTPS(raw) {
   return "";
 }
 
-export function squareCover(raw, size = 800) {
+export function squareCover(raw, size = 1024) {
   const u = normalizeHTTPS(raw);
   if (!u) return undefined;
   const clean = u.split("?")[0];
-  return `${clean}?param=${size}y${size}`;
+  return `${clean}?imageView&thumbnail=${size}y${size}&quality=88&type=jpg`;
 }
 
-export function avatarCover(raw, size = 192) {
+export function isPlaceholderArtistPic(raw) {
+  const u = normalizeHTTPS(raw);
+  if (!u) return true;
+  const clean = u.split("?")[0];
+  return PLACEHOLDER_ARTIST_PIC_RE.test(clean);
+}
+
+export function avatarCover(raw, size = 256) {
   return squareCover(raw, size);
+}
+
+export function artistAvatar(artist, size = 256) {
+  if (!artist || typeof artist !== "object") return undefined;
+  const candidates = [artist.avatar, artist.img1v1Url, artist.picUrl, artist.cover];
+  for (let i = 0; i < candidates.length; i++) {
+    const raw = candidates[i];
+    if (!isPlaceholderArtistPic(raw)) {
+      return avatarCover(raw, size);
+    }
+  }
+  return undefined;
 }
 
 export function mediaHeaders() {
@@ -129,16 +163,24 @@ function checkAPIResponse(resp, body, allowCodes) {
 
 export async function eapiRequest(apiPath, payload = {}, opts = {}) {
   const eapiPath = apiPath.startsWith("/api/") ? "/eapi/" + apiPath.slice(5) : apiPath;
-  const url = EAPI_HOST + eapiPath;
+  const hostBase = opts.host || EAPI_HOST;
+  const url = hostBase + eapiPath;
+  const nowMs = Date.now();
   const headerPayload = Object.assign(
     {
+      osver: "Microsoft-Windows-10-Professional-build-19045-64bit",
+      deviceId: getDeviceID(),
       os: "pc",
-      appver: "3.0.18.203152",
-      requestId: `${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+      appver: APP_VER,
+      versioncode: "140",
+      buildver: String(Math.floor(nowMs / 1000)),
+      resolution: "1920x1080",
+      channel: "netease",
+      requestId: `${nowMs}_${String(Math.floor(Math.random() * 1000)).padStart(4, "0")}`,
     },
     opts.header || {}
   );
-  const bodyObj = Object.assign({ header: JSON.stringify(headerPayload) }, payload);
+  const bodyObj = Object.assign({ header: headerPayload }, payload);
   const { params } = encryptEAPI(apiPath, bodyObj);
 
   let resp;
@@ -150,7 +192,7 @@ export async function eapiRequest(apiPath, payload = {}, opts = {}) {
         Accept: "application/json, text/plain, */*",
         Origin: MUSIC_ORIGIN,
         Referer: MUSIC_REFERER,
-        "User-Agent": WEB_UA,
+        "User-Agent": DESKTOP_UA,
       },
       body: formEncode({ params }),
     });
@@ -203,10 +245,17 @@ export async function weapiRequest(weapiPath, payload = {}, opts = {}) {
 }
 
 export function collectSetCookies(cookieMap, response) {
-  if (!response || !response.headers || typeof response.headers.getSetCookie !== "function") {
+  if (!response || !response.headers) {
     return;
   }
-  const headers = response.headers.getSetCookie();
+  let headers = [];
+  if (typeof response.headers.getSetCookie === "function") {
+    headers = response.headers.getSetCookie() || [];
+  }
+  if (headers.length === 0 && typeof response.headers.get === "function") {
+    const single = response.headers.get("set-cookie");
+    if (single) headers = [single];
+  }
   for (let i = 0; i < headers.length; i++) {
     const raw = String(headers[i] || "").trim();
     if (!raw) continue;
@@ -215,15 +264,32 @@ export function collectSetCookies(cookieMap, response) {
     const eq = pair.indexOf("=");
     if (eq <= 0) continue;
     const name = pair.slice(0, eq).trim();
-    const value = pair.slice(eq + 1).trim();
-    if (!name || !value) continue;
+    let value = pair.slice(eq + 1).trim();
+    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+      value = value.slice(1, -1);
+    }
+    if (!name || !value || !COOKIE_NAME_RE.test(name) || !COOKIE_VALUE_RE.test(value)) continue;
     const attrs = ["Domain=.music.163.com", "Path=/", "Secure"];
+    let deleted = false;
     for (let j = 1; j < parts.length; j++) {
       const seg = parts[j].trim();
       const lower = seg.toLowerCase();
-      if (lower === "httponly" || lower.startsWith("max-age=") || lower.startsWith("expires=")) {
-        attrs.push(seg);
+      if (lower === "httponly") {
+        attrs.push("HttpOnly");
+      } else if (lower.startsWith("max-age=")) {
+        const age = parseInt(seg.slice(8).trim(), 10);
+        if (Number.isFinite(age) && age <= 0) {
+          deleted = true;
+          break;
+        }
+        if (Number.isFinite(age) && age > 0) {
+          attrs.push(`Max-Age=${age}`);
+        }
       }
+    }
+    if (deleted) {
+      delete cookieMap[name];
+      continue;
     }
     cookieMap[name] = `${name}=${value}; ${attrs.join("; ")}`;
   }
@@ -253,7 +319,7 @@ export function artistsFromSong(song) {
     names.push(name);
     if (!primaryID) {
       primaryID = positiveID(ar?.id);
-      primaryAvatar = avatarCover(ar?.img1v1Url || ar?.picUrl);
+      primaryAvatar = artistAvatar(ar, 256);
     }
   }
   const joined = names.join(" / ");
@@ -285,8 +351,8 @@ export function mapSongItem(song, extra = {}) {
     title,
     subtitle: subtitleParts.join(" · ") || undefined,
     creator: creator && creator.id !== "0" ? creator : undefined,
-    coverURL: squareCover(pic, 800),
-    backdropURL: squareCover(pic, 1080),
+    coverURL: squareCover(pic, 1024),
+    backdropURL: squareCover(pic, 2048),
     durationSeconds,
     category: albumName || extra.category || undefined,
   };
@@ -314,8 +380,8 @@ export function mapPlaylistItem(pl, tag) {
     ref: { kind: "series", id: `pl:${id}` },
     title,
     subtitle: text(pl?.copywriter || pl?.description) || parts.join(" · ") || undefined,
-    coverURL: squareCover(pic, 800),
-    backdropURL: squareCover(pic, 1080),
+    coverURL: squareCover(pic, 1024),
+    backdropURL: squareCover(pic, 2048),
     views: playCount,
     category: tag || undefined,
   };
@@ -332,9 +398,9 @@ export function mapAlbumItem(album, tag) {
     ref: { kind: "series", id: `al:${id}` },
     title,
     subtitle: arName || undefined,
-    creator: arName && arID ? { id: arID, name: arName, avatarURL: avatarCover(album?.artist?.img1v1Url || album?.artist?.picUrl) } : undefined,
-    coverURL: squareCover(pic, 800),
-    backdropURL: squareCover(pic, 1080),
+    creator: arName && arID ? { id: arID, name: arName, avatarURL: artistAvatar(album?.artist, 256) } : undefined,
+    coverURL: squareCover(pic, 1024),
+    backdropURL: squareCover(pic, 2048),
     category: tag || undefined,
   };
 }

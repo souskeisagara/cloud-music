@@ -38,10 +38,41 @@
     "creatorGroupTitle": "Recommended Playlists",
     "membership": "VIP",
     "mobileApp": "NetEase Cloud Music",
+    "home": {
+      "picksTitle": "Worth Listening on the Big Screen",
+      "picksNote": "Great sound, crafted for the living room",
+      "continueTitle": "Keep Listening",
+      "rankingNote": "Most played tracks right now, updated daily."
+    },
+    "sections": {
+      "library": "My Music",
+      "favorites": "Playlists",
+      "history": "Recently Played",
+      "guestTitle": "Your music library, always ready.",
+      "guestNote": "Sign in to browse your playlists, favorites, and recently played tracks."
+    },
     "search": {
       "hint": "Search songs, artists, playlists, or albums",
+      "placeholder": "What do you want to listen to?",
+      "videoLabel": "Songs",
       "creatorLabel": "Artists",
-      "seriesLabel": "Playlists & Albums"
+      "seriesLabel": "Playlists & Albums",
+      "itemCountLabel": "%d songs"
+    },
+    "creator": {
+      "videosLabel": "Songs",
+      "collectionsLabel": "Albums",
+      "emptyVideos": "No public songs yet.",
+      "emptyCollections": "No albums yet."
+    },
+    "detail": {
+      "itemLabel": "Current Track",
+      "collectionLabel": "Tracks",
+      "collectionUnit": "Track",
+      "loading": "Loading track details…",
+      "loadFailed": "Unable to load track details.",
+      "previewAction": "Preview",
+      "accessAction": "Unlock Audio"
     }
   },
   "capabilities": [
@@ -76,10 +107,41 @@
         "creatorGroupTitle": "推荐歌单",
         "membership": "黑胶 VIP",
         "mobileApp": "网易云音乐 App",
+        "home": {
+          "picksTitle": "值得在大屏聆听",
+          "picksNote": "好声音，值得被听见",
+          "continueTitle": "接着听，旋律不停",
+          "rankingNote": "发现此刻最受欢迎的热门曲目，每日更新。"
+        },
+        "sections": {
+          "library": "我的音乐",
+          "favorites": "我的歌单",
+          "history": "最近播放",
+          "guestTitle": "你的音乐库，随时接着听。",
+          "guestNote": "登录后查看个人歌单、红心与最近播放。"
+        },
         "search": {
           "hint": "试试搜索歌曲、歌手、歌单或专辑",
+          "placeholder": "想听点什么？",
+          "videoLabel": "单曲",
           "creatorLabel": "歌手",
-          "seriesLabel": "歌单专辑"
+          "seriesLabel": "歌单专辑",
+          "itemCountLabel": "%d 首歌曲"
+        },
+        "creator": {
+          "videosLabel": "单曲",
+          "collectionsLabel": "专辑",
+          "emptyVideos": "暂无公开单曲。",
+          "emptyCollections": "暂无专辑。"
+        },
+        "detail": {
+          "itemLabel": "当前曲目",
+          "collectionLabel": "曲目",
+          "collectionUnit": "曲目",
+          "loading": "正在读取曲目详情…",
+          "loadFailed": "无法加载曲目详情。",
+          "previewAction": "立即试听",
+          "accessAction": "解锁畅听"
         }
       }
     },
@@ -98,10 +160,41 @@
         "creatorGroupTitle": "おすすめプレイリスト",
         "membership": "VIP",
         "mobileApp": "Cloud Music App",
+        "home": {
+          "picksTitle": "大画面で聴きたい名曲",
+          "picksNote": "いい音楽を、リビングで",
+          "continueTitle": "続きから再生",
+          "rankingNote": "今人気のトラックを毎日更新。"
+        },
+        "sections": {
+          "library": "マイミュージック",
+          "favorites": "プレイリスト",
+          "history": "最近再生",
+          "guestTitle": "あなたのライブラリを大画面で。",
+          "guestNote": "サインインしてプレイリストや再生履歴を表示します。"
+        },
         "search": {
           "hint": "曲・アーティスト・プレイリスト・アルバムを検索",
+          "placeholder": "何を聴きますか？",
+          "videoLabel": "曲",
           "creatorLabel": "アーティスト",
-          "seriesLabel": "プレイリスト"
+          "seriesLabel": "プレイリスト",
+          "itemCountLabel": "%d 曲"
+        },
+        "creator": {
+          "videosLabel": "曲",
+          "collectionsLabel": "アルバム",
+          "emptyVideos": "公開されている曲がありません。",
+          "emptyCollections": "アルバムがありません。"
+        },
+        "detail": {
+          "itemLabel": "再生中の曲",
+          "collectionLabel": "トラック",
+          "collectionUnit": "トラック",
+          "loading": "曲の詳細を読み込み中…",
+          "loadFailed": "曲の詳細を読み込めませんでした。",
+          "previewAction": "試聴する",
+          "accessAction": "フル再生を解除"
         }
       }
     }

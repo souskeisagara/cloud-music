@@ -50,7 +50,7 @@ async function readFavorites({ owner, folder = "", cursor = "", secret }) {
           id,
           title,
           count: count(pl?.trackCount),
-          coverURL: squareCover(pl?.coverImgUrl, 800),
+          coverURL: squareCover(pl?.coverImgUrl, 1024),
           private: Number(pl?.privacy || 0) === 10,
           canDelete: false,
           ref: { kind: "collection", id },
