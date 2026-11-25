@@ -41,13 +41,13 @@ function resolveActiveVIP(vipData, profile, accountInfo) {
   return false;
 }
 
-async function fetchVIPInfo(csrf = "") {
+async function fetchVIPInfo(csrf = "", musicU = "") {
   const attempts = [
     () =>
       eapiRequest(
         "/api/music-vip-membership/client/vip/info",
         {},
-        { allowCodes: [200] }
+        { csrf, musicU, allowCodes: [200] }
       ),
     () =>
       weapiRequest(
@@ -107,7 +107,7 @@ function buildAccount(profile, accountInfo, vipData, fallback) {
   return account;
 }
 
-async function fetchUserAccount(cookieMap, csrf = "") {
+async function fetchUserAccount(cookieMap, csrf = "", musicU = "") {
   const attempts = [
     () =>
       weapiRequest(
@@ -125,13 +125,13 @@ async function fetchUserAccount(cookieMap, csrf = "") {
       eapiRequest(
         "/api/w/nuser/account/get",
         {},
-        { withResponse: true, allowCodes: [200] }
+        { csrf, musicU, withResponse: true, allowCodes: [200] }
       ),
     () =>
       eapiRequest(
         "/api/nuser/account/get",
         {},
-        { withResponse: true, allowCodes: [200] }
+        { csrf, musicU, withResponse: true, allowCodes: [200] }
       ),
   ];
 
@@ -203,10 +203,11 @@ export async function pollSignIn(req) {
     throw { code: "signIn", message: "No session cookies returned." };
   }
   const csrf = extractCookieValue(cookieMap, "__csrf");
-  const { profile, accountInfo } = await fetchUserAccount(cookieMap, csrf);
+  const initialMusicU = extractCookieValue(cookieMap, "MUSIC_U");
+  const { profile, accountInfo } = await fetchUserAccount(cookieMap, csrf, initialMusicU);
   const resolvedCSRF = extractCookieValue(cookieMap, "__csrf") || csrf;
-  const musicU = extractCookieValue(cookieMap, "MUSIC_U");
-  const vipData = await fetchVIPInfo(resolvedCSRF);
+  const musicU = extractCookieValue(cookieMap, "MUSIC_U") || initialMusicU;
+  const vipData = await fetchVIPInfo(resolvedCSRF, musicU);
   const finalHeaders = finalizeCookieHeaders(cookieMap);
   const account = buildAccount(profile, accountInfo, vipData, null);
   return {
@@ -225,10 +226,10 @@ export async function pollSignIn(req) {
 
 export async function restoreAccount(secret) {
   const cookieMap = {};
-  const { profile, accountInfo } = await fetchUserAccount(cookieMap, text(secret?.csrf));
+  const { profile, accountInfo } = await fetchUserAccount(cookieMap, text(secret?.csrf), text(secret?.musicU));
   const csrf = extractCookieValue(cookieMap, "__csrf") || text(secret?.csrf);
   const musicU = extractCookieValue(cookieMap, "MUSIC_U") || text(secret?.musicU);
-  const vipData = await fetchVIPInfo(csrf);
+  const vipData = await fetchVIPInfo(csrf, musicU);
   const account = buildAccount(profile, accountInfo, vipData, secret);
   const out = {
     account,

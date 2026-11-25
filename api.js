@@ -1,24 +1,26 @@
 // EAPI / WeAPI transport built on MikuTV's native host.crypto primitives.
 
 export const MUSIC_ORIGIN = "https://music.163.com";
-export const MUSIC_REFERER = "https://music.163.com/";
+export const MUSIC_REFERER = "https://music.163.com";
 export const EAPI_HOST = "https://interface.music.163.com";
 export const CLIENTLOG_HOST = "https://clientlog.music.163.com";
-export const APP_VER = "3.1.17.204416";
 export const OSX_APP_VER = "3.1.10.5100";
 export const OSX_OS_VER = "15.5";
-export const DESKTOP_UA =
-  "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/3.1.29.205117";
 export const OSX_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-export const WEB_UA =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+export const WEAPI_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0";
+export const LINUX_UA =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.90 Safari/537.36";
+export const WEB_UA = OSX_UA;
 
 const PLACEHOLDER_ARTIST_PIC_RE = /\/5639395138885805\.(?:jpg|png|webp)$/i;
 const COOKIE_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const COOKIE_VALUE_RE = /^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]+$/;
 const DEVICE_ID_KEY = "ncm_device_id";
+const NMTID_CACHE_KEY = "ncm:nmtid";
 let cachedDeviceID = "";
+let cachedNMTID = "";
 
 function getDeviceID() {
   if (cachedDeviceID) {
@@ -43,6 +45,7 @@ function getDeviceID() {
 }
 
 const EAPI_KEY = "e82ckenh8dichen8";
+const LINUXAPI_KEY = "rFgB&h#%2?^eDg:Q";
 const WEAPI_PRESET_KEY = "0CoJUm6Qyw8W8jud";
 const WEAPI_IV = "0102030405060708";
 const WEAPI_MODULUS =
@@ -105,9 +108,41 @@ export function artistAvatar(artist, size = 256) {
 
 export function mediaHeaders() {
   return {
-    Referer: MUSIC_REFERER,
+    Referer: `${MUSIC_ORIGIN}/`,
     "User-Agent": WEB_UA,
   };
+}
+
+function getCachedNMTID() {
+  if (cachedNMTID) return cachedNMTID;
+  const hit = text(sessionCacheGet(NMTID_CACHE_KEY));
+  if (hit) {
+    cachedNMTID = hit;
+    return cachedNMTID;
+  }
+  return "";
+}
+
+function captureNMTID(response) {
+  if (!response || !response.headers) return;
+  let list = [];
+  if (typeof response.headers.getSetCookie === "function") {
+    list = response.headers.getSetCookie() || [];
+  } else if (typeof response.headers.get === "function") {
+    const single = response.headers.get("set-cookie");
+    if (single) list = [single];
+  }
+  for (let i = 0; i < list.length; i++) {
+    const m = String(list[i] || "").match(/(?:^|;\s*)NMTID=([^;]+)/);
+    if (m && m[1]) {
+      const val = m[1].trim();
+      if (val && COOKIE_VALUE_RE.test(val)) {
+        cachedNMTID = val;
+        sessionCacheSet(NMTID_CACHE_KEY, val, 86400);
+        return;
+      }
+    }
+  }
 }
 
 export function sessionCacheGet(key) {
@@ -213,32 +248,30 @@ function formEncode(obj) {
 }
 
 function checkAPIResponse(resp, body, allowCodes) {
-  if (resp.status === 429) throw { code: "rateLimited" };
-  if (resp.status === 401 || resp.status === 403) throw { code: "signIn" };
+  if (resp.status === 429) throw { code: "rateLimited", message: "HTTP 429" };
+  if (resp.status === 401 || resp.status === 403) throw { code: "signIn", message: `HTTP ${resp.status}` };
   if (!resp.ok) throw { code: "network", message: `HTTP ${resp.status}` };
   if (!body || typeof body !== "object") throw { code: "plugin", message: "Invalid JSON response" };
   const code = Number(body.code ?? 200);
   if (allowCodes && allowCodes.includes(code)) return body;
   if (code === 200) return body;
-  if (code === 301 || code === 302 || code === -2) throw { code: "signIn", message: text(body.message || body.msg) || "Sign-in required" };
-  if (code === 405 || code === 406 || code === 460 || code === -460 || code === -462) {
-    throw { code: "rateLimited", message: text(body.message || body.msg) || "Rate limited" };
+  const msg = text(body.message || body.msg);
+  if (code === 301 || code === 302 || code === -2) throw { code: "signIn", message: msg || `Sign-in required (${code})` };
+  if (code === 405 || code === 406 || code === 460 || code === -460 || code === -462 || code === 250) {
+    throw { code: "rateLimited", message: msg ? `[${code}] ${msg}` : `Rate limited (${code})` };
   }
-  if (code === 404) throw { code: "expired", message: text(body.message || body.msg) || "Not found" };
-  throw { code: "plugin", message: text(body.message || body.msg) || `API error ${code}` };
+  if (code === 404) throw { code: "expired", message: msg || "Not found" };
+  throw { code: "plugin", message: msg ? `[${code}] ${msg}` : `API error ${code}` };
 }
 
-export async function eapiRequest(apiPath, payload = {}, opts = {}) {
-  const eapiPath = apiPath.startsWith("/api/") ? "/eapi/" + apiPath.slice(5) : apiPath;
-  const hostBase = opts.host || EAPI_HOST;
-  const url = hostBase + eapiPath;
+function buildEAPIHeader(opts = {}) {
   const nowMs = Date.now();
   const headerPayload = Object.assign(
     {
-      osver: "Microsoft-Windows-10-Professional-build-19045-64bit",
+      osver: OSX_OS_VER,
       deviceId: getDeviceID(),
-      os: "pc",
-      appver: APP_VER,
+      os: "osx",
+      appver: OSX_APP_VER,
       versioncode: "140",
       mobilename: "",
       buildver: String(Math.floor(nowMs / 1000)),
@@ -253,6 +286,33 @@ export async function eapiRequest(apiPath, payload = {}, opts = {}) {
   if (musicU && !headerPayload.MUSIC_U) {
     headerPayload.MUSIC_U = musicU;
   }
+  const nmtid = getCachedNMTID();
+  if (nmtid && !headerPayload.NMTID) {
+    headerPayload.NMTID = nmtid;
+  }
+  return headerPayload;
+}
+
+function buildEAPICookieHeader(headerPayload) {
+  return [
+    `os=${encodeURIComponent(headerPayload.os)}`,
+    `appver=${encodeURIComponent(headerPayload.appver)}`,
+    `osver=${encodeURIComponent(headerPayload.osver)}`,
+    `channel=${encodeURIComponent(headerPayload.channel)}`,
+    `deviceId=${encodeURIComponent(headerPayload.deviceId)}`,
+    `versioncode=${encodeURIComponent(headerPayload.versioncode)}`,
+    `mobilename=`,
+    `buildver=${encodeURIComponent(headerPayload.buildver)}`,
+    `resolution=${encodeURIComponent(headerPayload.resolution)}`,
+    `requestId=${encodeURIComponent(headerPayload.requestId)}`,
+  ].join("; ");
+}
+
+export async function eapiRequest(apiPath, payload = {}, opts = {}) {
+  const eapiPath = apiPath.startsWith("/api/") ? "/eapi/" + apiPath.slice(5) : apiPath;
+  const hostBase = opts.host || EAPI_HOST;
+  const url = hostBase + eapiPath;
+  const headerPayload = buildEAPIHeader(opts);
   const bodyObj = Object.assign({ header: headerPayload }, payload);
   const { params } = encryptEAPI(apiPath, bodyObj);
 
@@ -262,16 +322,15 @@ export async function eapiRequest(apiPath, payload = {}, opts = {}) {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
-        Accept: "application/json, text/plain, */*",
-        Origin: MUSIC_ORIGIN,
-        Referer: MUSIC_REFERER,
-        "User-Agent": DESKTOP_UA,
+        "User-Agent": OSX_UA,
+        Cookie: buildEAPICookieHeader(headerPayload),
       },
       body: formEncode({ params }),
     });
   } catch (err) {
     throw { code: "network", message: String((err && err.message) || err || "Network error") };
   }
+  captureNMTID(resp);
 
   let body;
   try {
@@ -289,49 +348,25 @@ export async function eapiRequest(apiPath, payload = {}, opts = {}) {
 export async function eapiClientLog(apiPath, payload = {}, secret = null) {
   const eapiPath = apiPath.startsWith("/api/") ? "/eapi/" + apiPath.slice(5) : apiPath;
   const url = CLIENTLOG_HOST + eapiPath;
-  const nowMs = Date.now();
-  const header = {
-    osver: OSX_OS_VER,
-    deviceId: getDeviceID(),
-    os: "osx",
-    appver: OSX_APP_VER,
-    versioncode: "140",
-    mobilename: "",
-    buildver: String(Math.floor(nowMs / 1000)),
-    resolution: "1920x1080",
-    __csrf: text(secret?.csrf),
-    channel: "netease",
-    requestId: `${nowMs}_${String(Math.floor(Math.random() * 1000)).padStart(4, "0")}`,
-  };
-  const musicU = text(secret?.musicU);
-  if (musicU) {
-    header.MUSIC_U = musicU;
-  }
+  const header = buildEAPIHeader({ csrf: secret?.csrf, musicU: secret?.musicU });
   const bodyObj = Object.assign({}, payload, { e_r: false, header });
   const { params } = encryptEAPIRaw(apiPath, bodyObj);
 
   let resp;
   try {
-    const dynamicCookie = [
-      `deviceId=${encodeURIComponent(header.deviceId)}`,
-      `versioncode=${encodeURIComponent(header.versioncode)}`,
-      `mobilename=`,
-      `buildver=${encodeURIComponent(header.buildver)}`,
-      `resolution=${encodeURIComponent(header.resolution)}`,
-      `requestId=${encodeURIComponent(header.requestId)}`,
-    ].join("; ");
     resp = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
         "User-Agent": OSX_UA,
-        Cookie: dynamicCookie,
+        Cookie: buildEAPICookieHeader(header),
       },
       body: formEncode({ params }),
     });
   } catch (err) {
     throw { code: "network", message: String((err && err.message) || err || "Network error") };
   }
+  captureNMTID(resp);
 
   let body;
   try {
@@ -346,8 +381,18 @@ export async function weapiRequest(weapiPath, payload = {}, opts = {}) {
   const csrf = text(opts.csrf);
   const path = weapiPath.startsWith("/weapi/") ? weapiPath : "/weapi/" + weapiPath.replace(/^\/+/, "");
   const url = MUSIC_ORIGIN + path + (csrf ? `?csrf_token=${encodeURIComponent(csrf)}` : "");
-  const bodyObj = csrf ? Object.assign({ csrf_token: csrf }, payload) : payload;
+  const bodyObj = Object.assign({ e_r: false }, payload, { csrf_token: csrf });
   const { params, encSecKey } = encryptWeAPI(bodyObj);
+  const webCookie = [
+    "__remember_me=true",
+    "ntes_kaola_ad=1",
+    "WEVNSM=1.0.0",
+    `deviceId=${encodeURIComponent(getDeviceID())}`,
+    "os=osx",
+    `appver=${encodeURIComponent(OSX_APP_VER)}`,
+    `osver=${encodeURIComponent(OSX_OS_VER)}`,
+    "channel=netease",
+  ].join("; ");
 
   let resp;
   try {
@@ -355,22 +400,64 @@ export async function weapiRequest(weapiPath, payload = {}, opts = {}) {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
-        Accept: "application/json, text/plain, */*",
-        Origin: MUSIC_ORIGIN,
         Referer: MUSIC_REFERER,
-        "User-Agent": WEB_UA,
+        "User-Agent": WEAPI_UA,
+        Cookie: webCookie,
       },
       body: formEncode({ params, encSecKey }),
     });
   } catch (err) {
     throw { code: "network", message: String((err && err.message) || err || "Network error") };
   }
+  captureNMTID(resp);
 
   let body;
   try {
     body = await resp.json();
   } catch (_) {
     throw { code: "plugin", message: "Failed to parse WeAPI JSON" };
+  }
+  const checked = checkAPIResponse(resp, body, opts.allowCodes);
+  return opts.withResponse ? { body: checked, response: resp } : checked;
+}
+
+export async function linuxapiRequest(apiPath, payload = {}, opts = {}) {
+  const path = apiPath.startsWith("/api/") ? apiPath : "/api/" + apiPath.replace(/^\/+/, "");
+  const envelope = JSON.stringify({
+    method: "POST",
+    url: MUSIC_ORIGIN + path,
+    params: payload || {},
+  });
+  const eparams = host.crypto
+    .aesEncrypt({
+      mode: "ecb",
+      key: LINUXAPI_KEY,
+      data: envelope,
+      outputEncoding: "hex",
+    })
+    .toUpperCase();
+
+  let resp;
+  try {
+    resp = await fetch(`${MUSIC_ORIGIN}/api/linux/forward`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": LINUX_UA,
+        Cookie: `os=osx; appver=${encodeURIComponent(OSX_APP_VER)}; osver=${encodeURIComponent(OSX_OS_VER)}; channel=netease; deviceId=${encodeURIComponent(getDeviceID())}`,
+      },
+      body: formEncode({ eparams }),
+    });
+  } catch (err) {
+    throw { code: "network", message: String((err && err.message) || err || "Network error") };
+  }
+  captureNMTID(resp);
+
+  let body;
+  try {
+    body = await resp.json();
+  } catch (_) {
+    throw { code: "plugin", message: "Failed to parse LinuxAPI JSON" };
   }
   const checked = checkAPIResponse(resp, body, opts.allowCodes);
   return opts.withResponse ? { body: checked, response: resp } : checked;

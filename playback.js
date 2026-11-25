@@ -91,13 +91,13 @@ function normalizeAudioLevel(raw) {
   return "";
 }
 
-async function getSongMeta(songID) {
+async function getSongMeta(songID, authOpts = {}) {
   const cached = songMetaCache.get(songID) || sessionCacheGetJSON(`meta:${songID}`);
   if (cached && cached.priv) {
     cacheSet(songMetaCache, songID, cached, 256);
     return cached;
   }
-  const songs = await fetchSongsByIDs([songID]).catch(() => []);
+  const songs = await fetchSongsByIDs([songID], authOpts).catch(() => []);
   const song = songs[0] || null;
   const priv = cachedSongPrivilege(songID);
   if (song) {
@@ -165,7 +165,8 @@ export async function reportPlayback({ data, secret } = {}) {
   if (!songID) return {};
 
   cleanupLegacyStorageKeys();
-  const meta = await getSongMeta(songID).catch(() => null);
+  const authOpts = { csrf: text(secret?.csrf), musicU: text(secret?.musicU) };
+  const meta = await getSongMeta(songID, authOpts).catch(() => null);
   const durationSec = meta?.dt > 0 ? Math.max(1, Math.round(meta.dt / 1000)) : 0;
   // When a track finishes naturally, the host resets seconds=0 with finished=true;
   // NetEase ignores playend logs with time=0, so always report the real track duration.
@@ -238,7 +239,7 @@ export async function reportPlayback({ data, secret } = {}) {
   return {};
 }
 
-async function resolveSongTarget(ref, partID) {
+async function resolveSongTarget(ref, partID, authOpts = {}) {
   const kind = text(ref?.kind);
   const rawID = text(ref?.id);
   if (kind === "video") {
@@ -249,7 +250,7 @@ async function resolveSongTarget(ref, partID) {
   if (kind === "series") {
     const [prefix, id] = rawID.split(":");
     if (prefix === "pl" && positiveID(id)) {
-      const { tracks } = await fetchPlaylistTracks(id, 300);
+      const { tracks } = await fetchPlaylistTracks(id, 300, authOpts);
       const episodes = tracks
         .map((s) => {
           const sid = positiveID(s?.id);
@@ -269,7 +270,7 @@ async function resolveSongTarget(ref, partID) {
       return { songID: chosen, partID: chosen, episodes };
     }
     if (prefix === "al" && positiveID(id)) {
-      const body = await eapiRequest(`/api/v1/album/${id}`, {});
+      const body = await eapiRequest(`/api/v1/album/${id}`, {}, authOpts);
       const songs = Array.isArray(body?.songs) ? body.songs : [];
       const episodes = songs
         .map((s) => {
@@ -292,10 +293,10 @@ async function resolveSongTarget(ref, partID) {
   throw { code: "unsupported" };
 }
 
-async function resolveMVPlan(mvid, songID, partID, episodes, requestedQuality) {
+async function resolveMVPlan(mvid, songID, partID, episodes, requestedQuality, authOpts = {}) {
   let cached = mvDetailCache.get(mvid) || sessionCacheGetJSON(`mv:${mvid}`);
   if (!cached) {
-    const detailRes = await eapiRequest("/api/v1/mv/detail", { id: Number(mvid) }).catch(() => null);
+    const detailRes = await eapiRequest("/api/v1/mv/detail", { id: Number(mvid) }, authOpts).catch(() => null);
     const brs = Array.isArray(detailRes?.data?.brs) ? detailRes.data.brs : [];
     const availableRes = brs
       .map((b) => Number(b?.br))
@@ -312,10 +313,14 @@ async function resolveMVPlan(mvid, songID, partID, episodes, requestedQuality) {
   const wanted = Number(requestedQuality) || resList[0] || 1080;
   const chosenRes = resList.includes(wanted) ? wanted : resList[0];
 
-  const mvRes = await eapiRequest("/api/song/enhance/play/mv/url", {
-    id: Number(mvid),
-    r: chosenRes,
-  });
+  const mvRes = await eapiRequest(
+    "/api/song/enhance/play/mv/url",
+    {
+      id: Number(mvid),
+      r: chosenRes,
+    },
+    authOpts
+  );
   const rawURL = normalizeHTTPS(mvRes?.data?.url);
   if (!rawURL) {
     throw { code: "expired", message: "MV stream unavailable." };
@@ -349,16 +354,18 @@ export async function resolvePlayback({
   quality = "",
   mediaKind = "",
   signedIn = false,
+  secret,
 } = {}) {
   const copy = t();
-  const target = await resolveSongTarget(ref, partID);
+  const authOpts = { csrf: text(secret?.csrf), musicU: text(secret?.musicU) };
+  const target = await resolveSongTarget(ref, partID, authOpts);
   const songID = target.songID;
-  const meta = await getSongMeta(songID);
+  const meta = await getSongMeta(songID, authOpts);
   const mvid = meta.mvid;
   const availableKinds = mvid ? ["audio", "video"] : ["audio"];
 
   if (mediaKind === "video" && mvid) {
-    return resolveMVPlan(mvid, songID, target.partID, target.episodes, quality);
+    return resolveMVPlan(mvid, songID, target.partID, target.episodes, quality, authOpts);
   }
 
   const priv = meta.priv;
@@ -372,19 +379,27 @@ export async function resolvePlayback({
   const validLevel = explicitQuality || autoLevel;
   const encodeType = validLevel === "hires" || validLevel === "lossless" ? "flac" : "mp3";
 
-  let urlRes = await eapiRequest("/api/song/enhance/player/url/v1", {
-    ids: `[${songID}]`,
-    level: validLevel,
-    encodeType,
-  });
+  let urlRes = await eapiRequest(
+    "/api/song/enhance/player/url/v1",
+    {
+      ids: `[${songID}]`,
+      level: validLevel,
+      encodeType,
+    },
+    authOpts
+  );
   let entry = Array.isArray(urlRes?.data) ? urlRes.data[0] : null;
   let streamURL = normalizeHTTPS(entry?.url);
   if (!streamURL && validLevel !== "standard") {
-    const fallbackRes = await eapiRequest("/api/song/enhance/player/url/v1", {
-      ids: `[${songID}]`,
-      level: "standard",
-      encodeType: "mp3",
-    }).catch(() => null);
+    const fallbackRes = await eapiRequest(
+      "/api/song/enhance/player/url/v1",
+      {
+        ids: `[${songID}]`,
+        level: "standard",
+        encodeType: "mp3",
+      },
+      authOpts
+    ).catch(() => null);
     const fbEntry = Array.isArray(fallbackRes?.data) ? fallbackRes.data[0] : null;
     if (normalizeHTTPS(fbEntry?.url)) {
       urlRes = fallbackRes;
@@ -499,7 +514,7 @@ function parseLRCLines(raw) {
   return out;
 }
 
-export async function readSubtitles({ ref, track } = {}) {
+export async function readSubtitles({ ref, track, secret } = {}) {
   let songID = "";
   let offsetSec = 0;
   const trackID = text(track?.id);
@@ -516,12 +531,16 @@ export async function readSubtitles({ ref, track } = {}) {
   }
   if (!songID) return { cues: [] };
 
-  const body = await eapiRequest("/api/song/lyric", {
-    id: Number(songID),
-    lv: -1,
-    tv: -1,
-    rv: -1,
-  });
+  const body = await eapiRequest(
+    "/api/song/lyric",
+    {
+      id: Number(songID),
+      lv: -1,
+      tv: -1,
+      rv: -1,
+    },
+    { csrf: text(secret?.csrf), musicU: text(secret?.musicU) }
+  );
   const primary = parseLRCLines(body?.lrc?.lyric || "");
   if (primary.length === 0) return { cues: [] };
   const trans = parseLRCLines(body?.tlyric?.lyric || "");

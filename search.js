@@ -25,8 +25,8 @@ function pageIndex(cursor) {
   return n;
 }
 
-async function hotKeywords() {
-  const body = await eapiRequest("/api/search/hot", { type: 1111 });
+async function hotKeywords(authOpts = {}) {
+  const body = await eapiRequest("/api/search/hot", { type: 1111 }, authOpts);
   const hots = Array.isArray(body?.result?.hots) ? body.result.hots : [];
   return hots
     .map((h) => text(h?.first))
@@ -50,18 +50,22 @@ function mapArtistCreator(row) {
   };
 }
 
-async function discovery(kind, page) {
+async function discovery(kind, page, authOpts = {}) {
   const copy = t();
-  const hot = page === 1 ? await hotKeywords().catch(() => []) : undefined;
+  const hot = page === 1 ? await hotKeywords(authOpts).catch(() => []) : undefined;
 
   if (kind === "series") {
-    const body = await eapiRequest("/api/playlist/list", {
-      cat: "全部",
-      order: "hot",
-      limit: PAGE_SIZE,
-      offset: (page - 1) * PAGE_SIZE,
-      total: true,
-    });
+    const body = await eapiRequest(
+      "/api/playlist/list",
+      {
+        cat: "全部",
+        order: "hot",
+        limit: PAGE_SIZE,
+        offset: (page - 1) * PAGE_SIZE,
+        total: true,
+      },
+      authOpts
+    );
     const items = (body?.playlists || []).map((pl) => mapPlaylistItem(pl, copy.playlistTag)).filter(Boolean);
     return {
       items,
@@ -71,7 +75,7 @@ async function discovery(kind, page) {
     };
   }
 
-  const { tracks, hasMore } = await fetchPlaylistTracksPage("3778678", (page - 1) * PAGE_SIZE, PAGE_SIZE);
+  const { tracks, hasMore } = await fetchPlaylistTracksPage("3778678", (page - 1) * PAGE_SIZE, PAGE_SIZE, authOpts);
   if (kind === "creator") {
     const seen = new Set();
     const creators = [];
@@ -103,24 +107,29 @@ async function discovery(kind, page) {
   };
 }
 
-export async function search({ query = "", kind = "all", cursor = "" } = {}) {
+export async function search({ query = "", kind = "all", cursor = "", secret } = {}) {
   const copy = t();
+  const authOpts = { csrf: text(secret?.csrf), musicU: text(secret?.musicU) };
   const keyword = text(query);
   const activeKind = kind || "all";
   const page = pageIndex(cursor);
   if (!keyword) {
-    return discovery(activeKind, page);
+    return discovery(activeKind, page, authOpts);
   }
   const offset = (page - 1) * PAGE_SIZE;
 
   if (activeKind === "creator") {
-    const body = await eapiRequest("/api/cloudsearch/pc", {
-      s: keyword,
-      type: 100,
-      limit: PAGE_SIZE,
-      offset,
-      total: true,
-    });
+    const body = await eapiRequest(
+      "/api/cloudsearch/pc",
+      {
+        s: keyword,
+        type: 100,
+        limit: PAGE_SIZE,
+        offset,
+        total: true,
+      },
+      authOpts
+    );
     const artists = Array.isArray(body?.result?.artists) ? body.result.artists : [];
     const creators = artists.map(mapArtistCreator).filter(Boolean);
     await hydrateCreatorsAvatars(creators);
@@ -135,21 +144,29 @@ export async function search({ query = "", kind = "all", cursor = "" } = {}) {
 
   if (activeKind === "series") {
     const [plBody, alBody] = await Promise.all([
-      eapiRequest("/api/cloudsearch/pc", {
-        s: keyword,
-        type: 1000,
-        limit: 12,
-        offset: (page - 1) * 12,
-        total: true,
-      }),
+      eapiRequest(
+        "/api/cloudsearch/pc",
+        {
+          s: keyword,
+          type: 1000,
+          limit: 12,
+          offset: (page - 1) * 12,
+          total: true,
+        },
+        authOpts
+      ),
       page === 1
-        ? eapiRequest("/api/cloudsearch/pc", {
-            s: keyword,
-            type: 10,
-            limit: 8,
-            offset: 0,
-            total: true,
-          }).catch(() => null)
+        ? eapiRequest(
+            "/api/cloudsearch/pc",
+            {
+              s: keyword,
+              type: 10,
+              limit: 8,
+              offset: 0,
+              total: true,
+            },
+            authOpts
+          ).catch(() => null)
         : Promise.resolve(null),
     ]);
     const playlists = (plBody?.result?.playlists || []).map((pl) => mapPlaylistItem(pl, copy.playlistTag)).filter(Boolean);
@@ -164,13 +181,17 @@ export async function search({ query = "", kind = "all", cursor = "" } = {}) {
     };
   }
 
-  const body = await eapiRequest("/api/cloudsearch/pc", {
-    s: keyword,
-    type: 1,
-    limit: PAGE_SIZE,
-    offset,
-    total: true,
-  });
+  const body = await eapiRequest(
+    "/api/cloudsearch/pc",
+    {
+      s: keyword,
+      type: 1,
+      limit: PAGE_SIZE,
+      offset,
+      total: true,
+    },
+    authOpts
+  );
   const songs = Array.isArray(body?.result?.songs) ? body.result.songs : [];
   const items = songs.map((s) => mapSongItem(s)).filter(Boolean);
   await hydrateItemsArtistAvatars(items);
@@ -183,10 +204,14 @@ export async function search({ query = "", kind = "all", cursor = "" } = {}) {
   };
 }
 
-export async function searchSuggest({ query = "" } = {}) {
+export async function searchSuggest({ query = "", secret } = {}) {
   const term = text(query);
   if (!term) return { suggestions: [] };
-  const body = await eapiRequest("/api/search/suggest/keyword", { s: term }).catch(() => null);
+  const body = await eapiRequest(
+    "/api/search/suggest/keyword",
+    { s: term },
+    { csrf: text(secret?.csrf), musicU: text(secret?.musicU) }
+  ).catch(() => null);
   const rows = Array.isArray(body?.result?.allMatch) ? body.result.allMatch : [];
   const seen = new Set();
   const suggestions = [];

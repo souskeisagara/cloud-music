@@ -10,7 +10,14 @@ import {
   text,
   weapiRequest,
 } from "./api.js";
-import { fetchPlaylistTracksPage, hydrateItemsArtistAvatars } from "./catalog.js";
+import {
+  fetchPlaylistTrackIDSet,
+  fetchPlaylistTracksPage,
+  hydrateItemsArtistAvatars,
+  invalidateLikedSongs,
+  invalidatePlaylistMeta,
+  readLikedSongSet,
+} from "./catalog.js";
 import { t } from "./i18n.js";
 
 function songToAccountRow(song, removable = false) {
@@ -48,16 +55,25 @@ async function readFavorites({ owner, folder = "", cursor = "", secret }) {
   const uid = positiveID(owner || secret?.uid);
   if (!uid) throw { code: "signIn", message: t().signInRequired };
 
+  const csrf = text(secret?.csrf);
+  const musicU = text(secret?.musicU);
   const page = Math.max(1, parseInt(String(cursor || "1"), 10) || 1);
   if (!folder) {
     const limit = 30;
     const offset = (page - 1) * limit;
-    const body = await eapiRequest("/api/user/playlist", {
+    const payload = {
       uid: Number(uid),
       limit,
       offset,
       includeVideo: false,
-    });
+    };
+    let body;
+    try {
+      body = await eapiRequest("/api/user/playlist", payload, { csrf, musicU });
+    } catch (err) {
+      if (err && err.code === "signIn") throw err;
+      body = await weapiRequest("/weapi/user/playlist", payload, { csrf });
+    }
     const list = Array.isArray(body?.playlist) ? body.playlist : [];
     const rows = list
       .map((pl) => {
@@ -92,7 +108,10 @@ async function readFavorites({ owner, folder = "", cursor = "", secret }) {
   if (!playlistID) throw { code: "permission" };
   const pageSize = 40;
   const offset = (page - 1) * pageSize;
-  const { playlist, tracks, total, hasMore } = await fetchPlaylistTracksPage(playlistID, offset, pageSize);
+  const { playlist, tracks, total, hasMore } = await fetchPlaylistTracksPage(playlistID, offset, pageSize, {
+    csrf,
+    musicU,
+  });
   const owned = positiveID(playlist?.userId ?? playlist?.creator?.userId) === uid;
   const rows = tracks.map((s) => songToAccountRow(s, owned)).filter(Boolean);
   await hydrateAccountRowsAvatars(rows);
@@ -122,6 +141,7 @@ async function readHistory({ owner, secret }) {
   };
 
   const csrf = text(secret?.csrf);
+  const musicU = text(secret?.musicU);
   let cloudSongs = [];
   const collectRecent = (res) => {
     const list = Array.isArray(res?.data?.list) ? res.data.list : [];
@@ -131,7 +151,7 @@ async function readHistory({ owner, secret }) {
     }
   };
   try {
-    collectRecent(await eapiRequest("/api/play-record/song/list", { limit: 100 }, { csrf }));
+    collectRecent(await eapiRequest("/api/play-record/song/list", { limit: 100 }, { csrf, musicU }));
   } catch (_) {}
 
   if (cloudSongs.length === 0) {
@@ -142,14 +162,14 @@ async function readHistory({ owner, secret }) {
 
   if (cloudSongs.length === 0) {
     try {
-      const body = await eapiRequest("/api/v1/play/record", { uid: Number(uid), type: 1 }, { csrf });
+      const body = await eapiRequest("/api/v1/play/record", { uid: Number(uid), type: 1 }, { csrf, musicU });
       const week = Array.isArray(body?.weekData) ? body.weekData : [];
       for (let i = 0; i < week.length; i++) cloudSongs.push(week[i]?.song || week[i]);
     } catch (_) {}
   }
   if (cloudSongs.length === 0) {
     try {
-      const body = await eapiRequest("/api/v1/play/record", { uid: Number(uid), type: 0 }, { csrf });
+      const body = await eapiRequest("/api/v1/play/record", { uid: Number(uid), type: 0 }, { csrf, musicU });
       const all = Array.isArray(body?.allData) ? body.allData : [];
       for (let i = 0; i < all.length; i++) cloudSongs.push(all[i]?.song || all[i]);
     } catch (_) {}
@@ -185,14 +205,16 @@ export async function editFavoriteFolder({
   const uid = positiveID(owner || secret?.uid);
   if (!uid) throw { code: "signIn" };
   const csrf = text(secret?.csrf);
+  const musicU = text(secret?.musicU);
 
   if (action === "create") {
     const name = text(title);
     if (!name) throw { code: "permission" };
     const payload = { name, privacy: isPrivate ? 10 : 0, type: "NORMAL" };
     try {
-      await eapiRequest("/api/playlist/create", payload);
-    } catch (_) {
+      await eapiRequest("/api/playlist/create", payload, { csrf, musicU });
+    } catch (err) {
+      if (err && err.code === "signIn") throw err;
       await weapiRequest("/weapi/playlist/create", payload, { csrf });
     }
     return {};
@@ -206,22 +228,26 @@ export async function editFavoriteFolder({
       const name = text(title);
       if (!name) throw { code: "permission" };
       try {
-        await eapiRequest("/api/playlist/update/name", { id: Number(pid), name });
-      } catch (_) {
+        await eapiRequest("/api/playlist/update/name", { id: Number(pid), name }, { csrf, musicU });
+      } catch (err) {
+        if (err && err.code === "signIn") throw err;
         await weapiRequest("/weapi/playlist/update/name", { id: Number(pid), name }, { csrf });
       }
       if (!isPrivate) {
-        await eapiRequest("/api/playlist/update/privacy", { id: Number(pid), privacy: 0 }).catch(() => null);
+        await eapiRequest("/api/playlist/update/privacy", { id: Number(pid), privacy: 0 }, { csrf, musicU }).catch(() => null);
       }
+      invalidatePlaylistMeta(pid);
       return {};
     }
     case "delete": {
       const payload = { ids: `[${pid}]` };
       try {
-        await eapiRequest("/api/playlist/remove", payload);
-      } catch (_) {
+        await eapiRequest("/api/playlist/remove", payload, { csrf, musicU });
+      } catch (err) {
+        if (err && err.code === "signIn") throw err;
         await weapiRequest("/weapi/playlist/remove", payload, { csrf });
       }
+      invalidatePlaylistMeta(pid);
       return {};
     }
     case "remove": {
@@ -236,11 +262,14 @@ export async function editFavoriteFolder({
           imme: "true",
         };
         try {
-          await eapiRequest("/api/playlist/manipulate/tracks", payload);
-        } catch (_) {
+          await eapiRequest("/api/playlist/manipulate/tracks", payload, { csrf, musicU });
+        } catch (err) {
+          if (err && err.code === "signIn") throw err;
           await weapiRequest("/weapi/playlist/manipulate/tracks", payload, { csrf });
         }
       }
+      invalidatePlaylistMeta(pid);
+      invalidateLikedSongs();
       return {};
     }
     default:
@@ -248,35 +277,28 @@ export async function editFavoriteFolder({
   }
 }
 
-async function playlistContainsSong(playlistID, songID) {
-  try {
-    const body = await eapiRequest("/api/v6/playlist/detail", {
-      id: Number(playlistID),
-      n: 0,
-      s: 0,
-    });
-    const tids = Array.isArray(body?.playlist?.trackIds) ? body.playlist.trackIds : [];
-    for (let i = 0; i < tids.length; i++) {
-      if (String(tids[i]?.id ?? tids[i]) === songID) {
-        return true;
-      }
-    }
-  } catch (_) {}
-  return false;
+async function playlistContainsSong(playlistID, songID, csrf = "", musicU = "") {
+  const idSet = await fetchPlaylistTrackIDSet(playlistID, { csrf, musicU });
+  return idSet.has(songID);
 }
 
-export async function videoFavoriteFolders({ ref, owner } = {}) {
-  const uid = positiveID(owner);
+export async function videoFavoriteFolders({ ref, owner, secret } = {}) {
+  const uid = positiveID(owner || secret?.uid);
   if (!uid) throw { code: "signIn" };
   if (text(ref?.kind) !== "video") throw { code: "unsupported" };
   const songID = positiveID(ref?.id);
   if (!songID) throw { code: "permission" };
+  const csrf = text(secret?.csrf);
+  const musicU = text(secret?.musicU);
 
-  const [plBody, likeBody] = await Promise.all([
-    eapiRequest("/api/user/playlist", { uid: Number(uid), limit: 100, offset: 0, includeVideo: false }),
-    eapiRequest("/api/song/like/get", { uid: Number(uid) }).catch(() => null),
+  const plPayload = { uid: Number(uid), limit: 100, offset: 0, includeVideo: false };
+  const [plBody, likedSet] = await Promise.all([
+    eapiRequest("/api/user/playlist", plPayload, { csrf, musicU }).catch((err) => {
+      if (err && err.code === "signIn") throw err;
+      return weapiRequest("/weapi/user/playlist", plPayload, { csrf });
+    }),
+    readLikedSongSet(uid, csrf, musicU),
   ]);
-  const likedSet = new Set((Array.isArray(likeBody?.ids) ? likeBody.ids : []).map((id) => String(id)));
   const owned = (Array.isArray(plBody?.playlist) ? plBody.playlist : []).filter(
     (pl) => positiveID(pl?.userId ?? pl?.creator?.userId) === uid && positiveID(pl?.id) && text(pl?.name)
   );
@@ -286,18 +308,18 @@ export async function videoFavoriteFolders({ ref, owner } = {}) {
     title: text(pl.name),
     count: count(pl.trackCount) ?? 0,
     private: Number(pl.privacy || 0) === 10,
-    selected: Number(pl.specialType || 0) === 5 ? likedSet.has(songID) : false,
+    selected: Number(pl.specialType || 0) === 5 ? Boolean(likedSet && likedSet.has(songID)) : false,
     _check: Number(pl.specialType || 0) !== 5,
   }));
 
   const toCheck = folders.filter((f) => f._check).slice(0, 16);
-  const concurrency = Math.min(6, toCheck.length);
+  const concurrency = Math.min(3, toCheck.length);
   let cursor = 0;
   async function worker() {
     while (cursor < toCheck.length) {
       const idx = cursor++;
       const entry = toCheck[idx];
-      entry.selected = await playlistContainsSong(entry.id, songID);
+      entry.selected = await playlistContainsSong(entry.id, songID, csrf, musicU);
     }
   }
   await Promise.all(Array.from({ length: concurrency }, () => worker()));
@@ -321,6 +343,7 @@ export async function editVideoFavoriteFolders({ data, secret } = {}) {
   const songID = positiveID(ref?.id);
   if (!songID) throw { code: "permission" };
   const csrf = text(secret?.csrf);
+  const musicU = text(secret?.musicU);
 
   const mutate = async (op, pid) => {
     const payload = {
@@ -330,10 +353,12 @@ export async function editVideoFavoriteFolders({ data, secret } = {}) {
       imme: "true",
     };
     try {
-      await eapiRequest("/api/playlist/manipulate/tracks", payload);
-    } catch (_) {
+      await eapiRequest("/api/playlist/manipulate/tracks", payload, { csrf, musicU });
+    } catch (err) {
+      if (err && err.code === "signIn") throw err;
       await weapiRequest("/weapi/playlist/manipulate/tracks", payload, { csrf });
     }
+    invalidatePlaylistMeta(pid);
   };
 
   for (let i = 0; i < add.length; i++) {
@@ -341,6 +366,9 @@ export async function editVideoFavoriteFolders({ data, secret } = {}) {
   }
   for (let i = 0; i < remove.length; i++) {
     await mutate("del", remove[i]);
+  }
+  if (add.length > 0 || remove.length > 0) {
+    invalidateLikedSongs();
   }
   return {};
 }

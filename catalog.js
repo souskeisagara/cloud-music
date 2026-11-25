@@ -9,20 +9,94 @@ import {
   mapPlaylistItem,
   mapSongItem,
   positiveID,
+  sessionCacheDelete,
   sessionCacheGet,
   sessionCacheGetJSON,
   sessionCacheSet,
   sessionCacheSetJSON,
   squareCover,
   text,
+  weapiRequest,
 } from "./api.js";
-import { followArtistByID, readFollowedArtistSet } from "./creator.js";
+import { followArtistByID, getCachedArtistFollowed, readFollowedArtistSet } from "./creator.js";
 import { t } from "./i18n.js";
 
 const ARTIST_AVATAR_CACHE_LIMIT = 512;
 const artistAvatarCache = new Map();
 const SONG_PRIVILEGE_CACHE_LIMIT = 512;
 const songPrivilegeCache = new Map();
+const LIKED_CACHE_KEY = "liked:songs";
+const LIKED_FAIL_KEY = "liked:songs:fail";
+let likedCache = { at: 0, ids: new Set() };
+
+export function invalidateLikedSongs(songID = "", enabled = null) {
+  likedCache = { at: 0, ids: new Set() };
+  sessionCacheDelete(LIKED_CACHE_KEY);
+  sessionCacheDelete(LIKED_FAIL_KEY);
+  const sid = positiveID(songID);
+  if (sid && typeof enabled === "boolean") {
+    sessionCacheSet(`liked:song:${sid}`, enabled ? "1" : "0", 180);
+  }
+}
+
+export function getCachedSongLiked(songID) {
+  const sid = positiveID(songID);
+  if (!sid) return undefined;
+  const override = sessionCacheGet(`liked:song:${sid}`);
+  if (override === "1") return true;
+  if (override === "0") return false;
+  if (likedCache.at > 0 && Date.now() - likedCache.at < 180_000) {
+    return likedCache.ids.has(sid);
+  }
+  const shared = sessionCacheGetJSON(LIKED_CACHE_KEY);
+  if (Array.isArray(shared)) {
+    const ids = new Set(shared);
+    likedCache = { at: Date.now(), ids };
+    return ids.has(sid);
+  }
+  return undefined;
+}
+
+export async function readLikedSongSet(uid, csrf = "", musicU = "") {
+  const cleanUID = positiveID(uid);
+  if (!cleanUID) return null;
+  const now = Date.now();
+  if (likedCache.at > 0 && now - likedCache.at < 180_000) {
+    return likedCache.ids;
+  }
+  const shared = sessionCacheGetJSON(LIKED_CACHE_KEY);
+  if (Array.isArray(shared)) {
+    const ids = new Set(shared);
+    likedCache = { at: now, ids };
+    return ids;
+  }
+  if (sessionCacheGet(LIKED_FAIL_KEY) === "1") {
+    return likedCache.ids;
+  }
+  try {
+    let body;
+    try {
+      body = await eapiRequest("/api/song/like/get", { uid: Number(cleanUID) }, { csrf, musicU });
+    } catch (err) {
+      if (err && err.code === "signIn") throw err;
+      body = await weapiRequest("/weapi/song/like/get", { uid: Number(cleanUID) }, { csrf });
+    }
+    const raw = Array.isArray(body?.ids) ? body.ids : [];
+    const next = new Set();
+    for (let i = 0; i < raw.length; i++) {
+      const id = positiveID(raw[i]);
+      if (id) next.add(id);
+    }
+    likedCache = { at: now, ids: next };
+    if (next.size <= 15000) {
+      sessionCacheSetJSON(LIKED_CACHE_KEY, Array.from(next), 180);
+    }
+    return next;
+  } catch (_) {
+    sessionCacheSet(LIKED_FAIL_KEY, "1", 180);
+    return likedCache.ids;
+  }
+}
 
 function rememberPrivilege(songID, priv) {
   if (!songID || !priv || typeof priv !== "object") return;
@@ -80,7 +154,7 @@ export async function fetchArtistAvatar(artistID) {
   return resolved || undefined;
 }
 
-export async function hydrateItemsArtistAvatars(items, concurrency = 8) {
+export async function hydrateItemsArtistAvatars(items, concurrency = 3) {
   if (!Array.isArray(items) || items.length === 0) return items;
   const missingSet = new Set();
   for (let i = 0; i < items.length; i++) {
@@ -109,7 +183,7 @@ export async function hydrateItemsArtistAvatars(items, concurrency = 8) {
   return items;
 }
 
-export async function hydrateCreatorsAvatars(creators, concurrency = 8) {
+export async function hydrateCreatorsAvatars(creators, concurrency = 3) {
   if (!Array.isArray(creators) || creators.length === 0) return creators;
   const missingSet = new Set();
   for (let i = 0; i < creators.length; i++) {
@@ -174,6 +248,35 @@ function genreFilters() {
 
 const playlistMetaCache = new Map();
 
+export function invalidatePlaylistMeta(playlistID) {
+  const id = positiveID(playlistID);
+  if (!id) return;
+  playlistMetaCache.delete(id);
+  sessionCacheDelete(`plmeta:${id}`);
+}
+
+function compactPlaylistSummary(pl) {
+  if (!pl || typeof pl !== "object") return {};
+  return {
+    id: pl.id,
+    name: pl.name,
+    userId: pl.userId,
+    coverImgUrl: pl.coverImgUrl,
+    description: pl.description,
+    playCount: pl.playCount,
+    trackCount: pl.trackCount,
+    privacy: pl.privacy,
+    specialType: pl.specialType,
+    creator: pl.creator
+      ? {
+          userId: pl.creator.userId,
+          nickname: pl.creator.nickname,
+          avatarUrl: pl.creator.avatarUrl,
+        }
+      : undefined,
+  };
+}
+
 function rememberPlaylistMeta(playlistID, playlist) {
   if (playlistMetaCache.size >= 32 && !playlistMetaCache.has(playlistID)) {
     const oldest = playlistMetaCache.keys().next().value;
@@ -191,17 +294,57 @@ function rememberPlaylistMeta(playlistID, playlist) {
   }
   const entry = { playlist, ids, initialMap };
   playlistMetaCache.set(playlistID, entry);
+  if (ids.length <= 5000) {
+    sessionCacheSetJSON(`plmeta:${playlistID}`, { playlist: compactPlaylistSummary(playlist), ids }, 180);
+  }
   return entry;
 }
 
-export async function fetchPlaylistTracksPage(playlistID, offset = 0, limit = 40) {
-  let meta = offset > 0 ? playlistMetaCache.get(playlistID) : null;
+function loadCachedPlaylistMeta(playlistID) {
+  const local = playlistMetaCache.get(playlistID);
+  if (local) return local;
+  const shared = sessionCacheGetJSON(`plmeta:${playlistID}`);
+  if (shared && shared.playlist && Array.isArray(shared.ids)) {
+    const entry = { playlist: shared.playlist, ids: shared.ids, initialMap: new Map() };
+    playlistMetaCache.set(playlistID, entry);
+    return entry;
+  }
+  return null;
+}
+
+export async function fetchPlaylistTrackIDSet(playlistID, authOpts = {}) {
+  const id = positiveID(playlistID);
+  if (!id) return new Set();
+  const cached = loadCachedPlaylistMeta(id);
+  if (cached && cached.ids.length > 0) {
+    return new Set(cached.ids);
+  }
+  try {
+    const body = await eapiRequest(
+      "/api/v6/playlist/detail",
+      { id: Number(id), n: 0, s: 0 },
+      authOpts
+    );
+    if (body?.playlist) {
+      const meta = rememberPlaylistMeta(id, body.playlist);
+      return new Set(meta.ids);
+    }
+  } catch (_) {}
+  return new Set();
+}
+
+export async function fetchPlaylistTracksPage(playlistID, offset = 0, limit = 40, authOpts = {}) {
+  let meta = offset > 0 ? loadCachedPlaylistMeta(playlistID) : null;
   if (!meta) {
-    const body = await eapiRequest("/api/v6/playlist/detail", {
-      id: Number(playlistID),
-      n: Math.min(limit, 60),
-      s: 0,
-    });
+    const body = await eapiRequest(
+      "/api/v6/playlist/detail",
+      {
+        id: Number(playlistID),
+        n: Math.min(limit, 60),
+        s: 0,
+      },
+      authOpts
+    );
     const pl = body?.playlist;
     if (!pl) throw { code: "expired" };
     meta = rememberPlaylistMeta(playlistID, pl);
@@ -214,7 +357,7 @@ export async function fetchPlaylistTracksPage(playlistID, offset = 0, limit = 40
   const pageIDs = meta.ids.slice(offset, offset + limit);
   const missing = pageIDs.filter((id) => !meta.initialMap.has(id));
   if (missing.length > 0) {
-    const hydrated = await fetchSongsByIDs(missing).catch(() => []);
+    const hydrated = await fetchSongsByIDs(missing, authOpts).catch(() => []);
     for (let i = 0; i < hydrated.length; i++) {
       const sid = positiveID(hydrated[i]?.id);
       if (sid) meta.initialMap.set(sid, hydrated[i]);
@@ -229,12 +372,12 @@ export async function fetchPlaylistTracksPage(playlistID, offset = 0, limit = 40
   };
 }
 
-export async function fetchPlaylistTracks(playlistID, limit = 60) {
-  const { playlist, tracks } = await fetchPlaylistTracksPage(playlistID, 0, limit);
+export async function fetchPlaylistTracks(playlistID, limit = 60, authOpts = {}) {
+  const { playlist, tracks } = await fetchPlaylistTracksPage(playlistID, 0, limit, authOpts);
   return { playlist, tracks };
 }
 
-export async function fetchSongsByIDs(ids) {
+export async function fetchSongsByIDs(ids, authOpts = {}) {
   const clean = [];
   for (let i = 0; i < ids.length; i++) {
     const id = positiveID(ids[i]);
@@ -244,9 +387,13 @@ export async function fetchSongsByIDs(ids) {
   const out = [];
   for (let i = 0; i < clean.length; i += 100) {
     const slice = clean.slice(i, i + 100);
-    const body = await eapiRequest("/api/v3/song/detail", {
-      c: JSON.stringify(slice.map((id) => ({ id: Number(id) }))),
-    });
+    const body = await eapiRequest(
+      "/api/v3/song/detail",
+      {
+        c: JSON.stringify(slice.map((id) => ({ id: Number(id) }))),
+      },
+      authOpts
+    );
     const privs = Array.isArray(body?.privileges) ? body.privileges : [];
     for (let j = 0; j < privs.length; j++) {
       const pid = positiveID(privs[j]?.id);
@@ -270,18 +417,22 @@ function pushUnique(target, seen, items) {
   }
 }
 
-async function browseRecommendations(cursor, signedIn) {
+async function browseRecommendations(cursor, signedIn, authOpts = {}) {
   const copy = t();
   const page = Math.max(1, parseInt(String(cursor || "1"), 10) || 1);
   if (page > 1) {
     const offset = (page - 1) * 20;
-    const plBody = await eapiRequest("/api/playlist/list", {
-      cat: "全部",
-      order: "hot",
-      limit: 20,
-      offset,
-      total: true,
-    });
+    const plBody = await eapiRequest(
+      "/api/playlist/list",
+      {
+        cat: "全部",
+        order: "hot",
+        limit: 20,
+        offset,
+        total: true,
+      },
+      authOpts
+    );
     const items = (plBody?.playlists || []).map((pl) => mapPlaylistItem(pl, copy.playlistTag)).filter(Boolean);
     return {
       collections: items.length ? [{ id: "more-playlists", title: copy.recommendedPlaylists, items }] : [],
@@ -290,12 +441,12 @@ async function browseRecommendations(cursor, signedIn) {
   }
 
   const jobs = [
-    eapiRequest("/api/personalized/newsong", { limit: 18, areaId: 0 }).catch(() => null),
-    fetchPlaylistTracks("3778678", 24).catch(() => null),
-    eapiRequest("/api/personalized/playlist", { limit: 16 }).catch(() => null),
+    eapiRequest("/api/personalized/newsong", { limit: 18, areaId: 0 }, authOpts).catch(() => null),
+    fetchPlaylistTracks("3778678", 24, authOpts).catch(() => null),
+    eapiRequest("/api/personalized/playlist", { limit: 16 }, authOpts).catch(() => null),
   ];
   if (signedIn) {
-    jobs.push(eapiRequest("/api/v3/discovery/recommend/songs", {}).catch(() => null));
+    jobs.push(eapiRequest("/api/v3/discovery/recommend/songs", {}, authOpts).catch(() => null));
   }
   const [newSongsRes, hotRes, playlistsRes, dailyRes] = await Promise.all(jobs);
 
@@ -340,13 +491,13 @@ async function browseRecommendations(cursor, signedIn) {
   };
 }
 
-async function browseChart(collection, filter, cursor = "") {
+async function browseChart(collection, filter, cursor = "", authOpts = {}) {
   const copy = t();
   const filters = chartFilters();
   const chartID = CHARTS.some((c) => c.id === filter) ? filter : CHARTS[0].id;
   const page = Math.max(1, parseInt(String(cursor || "1"), 10) || 1);
   const pageSize = 40;
-  const { tracks, hasMore } = await fetchPlaylistTracksPage(chartID, (page - 1) * pageSize, pageSize);
+  const { tracks, hasMore } = await fetchPlaylistTracksPage(chartID, (page - 1) * pageSize, pageSize, authOpts);
   const items = tracks.map((s) => mapSongItem(s)).filter(Boolean);
   await hydrateItemsArtistAvatars(items);
   return {
@@ -356,19 +507,23 @@ async function browseChart(collection, filter, cursor = "") {
   };
 }
 
-async function browseGenres(filter, cursor) {
+async function browseGenres(filter, cursor, authOpts = {}) {
   const copy = t();
   const filters = genreFilters();
   const cat = GENRES.some((g) => g.id === filter) ? filter : "全部";
   const page = Math.max(1, parseInt(String(cursor || "1"), 10) || 1);
   const limit = 24;
-  const body = await eapiRequest("/api/playlist/list", {
-    cat,
-    order: "hot",
-    limit,
-    offset: (page - 1) * limit,
-    total: true,
-  });
+  const body = await eapiRequest(
+    "/api/playlist/list",
+    {
+      cat,
+      order: "hot",
+      limit,
+      offset: (page - 1) * limit,
+      total: true,
+    },
+    authOpts
+  );
   const items = (body?.playlists || []).map((pl) => mapPlaylistItem(pl, cat === "全部" ? copy.playlistTag : cat)).filter(Boolean);
   return {
     collections: items.length ? [{ id: "regions", title: copy.regions, items }] : [],
@@ -377,17 +532,18 @@ async function browseGenres(filter, cursor) {
   };
 }
 
-export async function browse({ collection = "", filter = "", cursor = "", signedIn = false } = {}) {
+export async function browse({ collection = "", filter = "", cursor = "", signedIn = false, secret } = {}) {
+  const authOpts = { csrf: text(secret?.csrf), musicU: text(secret?.musicU) };
   switch (collection) {
     case "":
     case "recommendations":
-      return browseRecommendations(cursor, signedIn);
+      return browseRecommendations(cursor, signedIn, authOpts);
     case "popular":
-      return browseChart("popular", filter || "19723756", cursor);
+      return browseChart("popular", filter || "19723756", cursor, authOpts);
     case "ranking":
-      return browseChart("ranking", filter || "3778678", cursor);
+      return browseChart("ranking", filter || "3778678", cursor, authOpts);
     case "regions":
-      return browseGenres(filter, cursor);
+      return browseGenres(filter, cursor, authOpts);
     default:
       throw { code: "unsupported" };
   }
@@ -432,7 +588,10 @@ function commentThreadForRef(ref) {
 }
 
 async function fetchSongDetail(songID, signedIn, secret) {
-  const songWithAvatarJob = fetchSongsByIDs([songID]).then(async (songs) => {
+  const csrf = text(secret?.csrf);
+  const musicU = text(secret?.musicU);
+  const authOpts = { csrf, musicU };
+  const songWithAvatarJob = fetchSongsByIDs([songID], authOpts).then(async (songs) => {
     const song = songs[0];
     if (!song) return { song: null, avatarURL: undefined };
     const firstArtist = Array.isArray(song?.ar) ? song.ar[0] : Array.isArray(song?.artists) ? song.artists[0] : null;
@@ -443,14 +602,15 @@ async function fetchSongDetail(songID, signedIn, secret) {
     }
     return { song, avatarURL };
   });
-  const [{ song, avatarURL }, commentRes, simiRes, likeRes, followedSet] = await Promise.all([
+  const cachedLiked = signedIn ? getCachedSongLiked(songID) : undefined;
+  const [{ song, avatarURL }, commentRes, simiRes, likedSet, followedSet] = await Promise.all([
     songWithAvatarJob,
-    eapiRequest(`/api/v1/resource/comments/R_SO_4_${songID}`, { limit: 15, offset: 0 }).catch(() => null),
-    eapiRequest("/api/v1/discovery/simiSong", { songid: Number(songID), limit: 12, offset: 0 }).catch(() => null),
-    signedIn && positiveID(secret?.uid)
-      ? eapiRequest("/api/song/like/get", { uid: Number(secret.uid) }).catch(() => null)
+    eapiRequest(`/api/v1/resource/comments/R_SO_4_${songID}`, { limit: 15, offset: 0 }, authOpts).catch(() => null),
+    eapiRequest("/api/v1/discovery/simiSong", { songid: Number(songID), limit: 12, offset: 0 }, authOpts).catch(() => null),
+    signedIn && cachedLiked === undefined && positiveID(secret?.uid)
+      ? readLikedSongSet(secret.uid, csrf, musicU)
       : Promise.resolve(null),
-    signedIn ? readFollowedArtistSet() : Promise.resolve(null),
+    signedIn ? readFollowedArtistSet(csrf, musicU) : Promise.resolve(null),
   ]);
   if (!song) throw { code: "expired" };
   const base = mapSongItem(song);
@@ -459,24 +619,32 @@ async function fetchSongDetail(songID, signedIn, secret) {
     if (!base.creator.avatarURL && avatarURL) {
       base.creator.avatarURL = avatarURL;
     }
-    if (followedSet && base.creator.id && followedSet.has(base.creator.id)) {
-      base.creator.following = true;
+    if (base.creator.id) {
+      const override = getCachedArtistFollowed(base.creator.id);
+      if (override !== undefined) {
+        base.creator.following = override;
+      } else if (followedSet && followedSet.has(base.creator.id)) {
+        base.creator.following = true;
+      }
     }
   }
 
-  const likedIDs = Array.isArray(likeRes?.ids) ? likeRes.ids : [];
-  const isLiked = likedIDs.some((id) => String(id) === songID);
+  const isLiked = cachedLiked !== undefined ? cachedLiked : Boolean(likedSet && likedSet.has(songID));
   const hotComments = (commentRes?.hotComments || []).map(mapComment).filter(Boolean);
   const recentComments = (commentRes?.comments || []).map(mapComment).filter(Boolean);
   const comments = hotComments.length > 0 ? hotComments : recentComments;
   let related = (simiRes?.songs || []).map((s) => mapSongItem(s)).filter(Boolean);
   if (related.length === 0 && base.creator?.id && positiveID(base.creator.id)) {
-    const artistSongs = await eapiRequest("/api/v1/artist/songs", {
-      id: Number(base.creator.id),
-      order: "hot",
-      limit: 12,
-      offset: 0,
-    }).catch(() => null);
+    const artistSongs = await eapiRequest(
+      "/api/v1/artist/songs",
+      {
+        id: Number(base.creator.id),
+        order: "hot",
+        limit: 12,
+        offset: 0,
+      },
+      authOpts
+    ).catch(() => null);
     related = (artistSongs?.songs || [])
       .map((s) => mapSongItem(s))
       .filter((it) => it && it.ref.id !== songID);
@@ -501,12 +669,13 @@ async function fetchSongDetail(songID, signedIn, secret) {
   });
 }
 
-async function fetchCollectionDetail(kindPrefix, id) {
+async function fetchCollectionDetail(kindPrefix, id, secret) {
   const copy = t();
+  const authOpts = { csrf: text(secret?.csrf), musicU: text(secret?.musicU) };
   if (kindPrefix === "pl") {
     const [{ playlist, tracks }, commentRes] = await Promise.all([
-      fetchPlaylistTracks(id, 300),
-      eapiRequest(`/api/v1/resource/comments/A_PL_0_${id}`, { limit: 15, offset: 0 }).catch(() => null),
+      fetchPlaylistTracks(id, 300, authOpts),
+      eapiRequest(`/api/v1/resource/comments/A_PL_0_${id}`, { limit: 15, offset: 0 }, authOpts).catch(() => null),
     ]);
     const segments = tracks
       .map((s) => {
@@ -552,8 +721,8 @@ async function fetchCollectionDetail(kindPrefix, id) {
   }
   if (kindPrefix === "al") {
     const [body, commentRes] = await Promise.all([
-      eapiRequest(`/api/v1/album/${id}`, {}),
-      eapiRequest(`/api/v1/resource/comments/R_AL_3_${id}`, { limit: 15, offset: 0 }).catch(() => null),
+      eapiRequest(`/api/v1/album/${id}`, {}, authOpts),
+      eapiRequest(`/api/v1/resource/comments/R_AL_3_${id}`, { limit: 15, offset: 0 }, authOpts).catch(() => null),
     ]);
     const album = body?.album;
     if (!album) throw { code: "expired" };
@@ -606,28 +775,33 @@ export async function getItem(input) {
   if (kind === "series") {
     const [prefix, id] = rawID.split(":");
     if ((prefix === "pl" || prefix === "al") && positiveID(id)) {
-      return fetchCollectionDetail(prefix, id);
+      return fetchCollectionDetail(prefix, id, input?.secret);
     }
   }
   throw { code: "unsupported" };
 }
 
-export async function videoComments({ ref, order = "hot", threadID = "", page = 0 } = {}) {
+export async function videoComments({ ref, order = "hot", threadID = "", page = 0, secret } = {}) {
   const target = commentThreadForRef(ref);
   if (!target) return { comments: [] };
   const limit = 20;
+  const authOpts = { csrf: text(secret?.csrf), musicU: text(secret?.musicU) };
 
   if (threadID) {
     const parentID = positiveID(threadID);
     if (!parentID) return { comments: [] };
     if (Number(page) > 1) return { comments: [] };
-    const body = await eapiRequest("/api/comment/floor/get", {
-      parentCommentId: Number(parentID),
-      threadId: target.thread,
-      type: target.type,
-      limit,
-      time: -1,
-    }).catch(() => null);
+    const body = await eapiRequest(
+      "/api/comment/floor/get",
+      {
+        parentCommentId: Number(parentID),
+        threadId: target.thread,
+        type: target.type,
+        limit,
+        time: -1,
+      },
+      authOpts
+    ).catch(() => null);
     const rows = Array.isArray(body?.data?.comments) ? body.data.comments : [];
     return {
       comments: rows.map(mapComment).filter(Boolean),
@@ -637,10 +811,14 @@ export async function videoComments({ ref, order = "hot", threadID = "", page = 
   const pageIdx = Math.max(0, Number(page) || 0);
   const offset = pageIdx * limit;
   if (order === "hot") {
-    const hotBody = await eapiRequest(`/api/v1/resource/hotcomments/${target.thread}`, {
-      limit,
-      offset,
-    }).catch(() => null);
+    const hotBody = await eapiRequest(
+      `/api/v1/resource/hotcomments/${target.thread}`,
+      {
+        limit,
+        offset,
+      },
+      authOpts
+    ).catch(() => null);
     if (hotBody && Array.isArray(hotBody.hotComments) && hotBody.hotComments.length > 0) {
       const comments = hotBody.hotComments.map(mapComment).filter(Boolean);
       return {
@@ -653,10 +831,14 @@ export async function videoComments({ ref, order = "hot", threadID = "", page = 
     }
   }
 
-  const body = await eapiRequest(`/api/v1/resource/comments/${target.thread}`, {
-    limit,
-    offset,
-  });
+  const body = await eapiRequest(
+    `/api/v1/resource/comments/${target.thread}`,
+    {
+      limit,
+      offset,
+    },
+    authOpts
+  );
   const list =
     order === "hot" && pageIdx === 0 && Array.isArray(body?.hotComments) && body.hotComments.length > 0
       ? body.hotComments
@@ -674,19 +856,28 @@ export async function editVideo({ ref, interaction, enabled, replyID, owner, sec
   if (!uid) throw { code: "signIn" };
   const target = commentThreadForRef(ref);
   if (!target) throw { code: "permission" };
+  const csrf = text(secret?.csrf);
+  const musicU = text(secret?.musicU);
   if (interaction === "like") {
     if (target.type !== 0) throw { code: "unsupported" };
-    await eapiRequest("/api/radio/like", {
+    const payload = {
       trackId: Number(target.id),
       like: Boolean(enabled),
       alg: "itembased",
       time: 3,
-    });
+    };
+    try {
+      await eapiRequest("/api/radio/like", payload, { csrf, musicU });
+    } catch (err) {
+      if (err && err.code === "signIn") throw err;
+      await weapiRequest("/weapi/radio/like", payload, { csrf });
+    }
+    invalidateLikedSongs(target.id, Boolean(enabled));
     return { liked: Boolean(enabled) };
   }
   if (interaction === "follow") {
     if (target.type !== 0) throw { code: "unsupported" };
-    const songs = await fetchSongsByIDs([target.id]);
+    const songs = await fetchSongsByIDs([target.id], { csrf, musicU });
     const song = songs[0];
     const firstArtist = Array.isArray(song?.ar) ? song.ar[0] : Array.isArray(song?.artists) ? song.artists[0] : null;
     const aid = positiveID(firstArtist?.id);
@@ -696,10 +887,18 @@ export async function editVideo({ ref, interaction, enabled, replyID, owner, sec
   if (interaction === "replyLike") {
     const cid = positiveID(replyID);
     if (!cid) throw { code: "permission" };
-    await eapiRequest(enabled ? "/api/v1/comment/like" : "/api/v1/comment/unlike", {
+    const payload = {
       cid: Number(cid),
       threadId: target.thread,
-    });
+    };
+    const apiPath = enabled ? "/api/v1/comment/like" : "/api/v1/comment/unlike";
+    const weapiPath = enabled ? "/weapi/v1/comment/like" : "/weapi/v1/comment/unlike";
+    try {
+      await eapiRequest(apiPath, payload, { csrf, musicU });
+    } catch (err) {
+      if (err && err.code === "signIn") throw err;
+      await weapiRequest(weapiPath, payload, { csrf });
+    }
     return { liked: Boolean(enabled) };
   }
   throw { code: "unsupported" };
