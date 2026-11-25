@@ -1,4 +1,4 @@
-// Artist / creator profile, top songs, and albums.
+// Artist / creator profile, paginated songs, and albums.
 
 import {
   artistAvatar,
@@ -21,10 +21,19 @@ export async function readCreator({ creatorID, tab = "videos", cursor = "", incl
 
   const activeTab = tab || "videos";
   const page = Math.max(1, parseInt(String(cursor || "1"), 10) || 1);
+  const songPageSize = 30;
 
-  const [artistBody, albumsBody] = await Promise.all([
-    includeProfile || activeTab === "videos" || activeTab === "about"
-      ? eapiRequest(`/api/v1/artist/${artistID}`, {})
+  const [artistBody, songsBody, albumsBody] = await Promise.all([
+    includeProfile || activeTab === "about" || (activeTab === "videos" && page === 1)
+      ? eapiRequest(`/api/v1/artist/${artistID}`, {}).catch(() => null)
+      : Promise.resolve(null),
+    activeTab === "videos"
+      ? eapiRequest("/api/v1/artist/songs", {
+          id: Number(artistID),
+          order: "hot",
+          limit: songPageSize,
+          offset: (page - 1) * songPageSize,
+        }).catch(() => null)
       : Promise.resolve(null),
     activeTab === "collections"
       ? eapiRequest(`/api/artist/albums/${artistID}`, {
@@ -35,16 +44,18 @@ export async function readCreator({ creatorID, tab = "videos", cursor = "", incl
       : Promise.resolve(null),
   ]);
 
+  const artist = artistBody?.artist;
+  const resolvedAvatar = artistAvatar(artist, 256);
+
   const out = {};
   if (includeProfile) {
-    const artist = artistBody?.artist;
     const name = text(artist?.name);
     if (!name) throw { code: "expired" };
     out.profile = {
       creator: {
         id: artistID,
         name,
-        avatarURL: artistAvatar(artist, 256),
+        avatarURL: resolvedAvatar,
       },
       backdropURL: squareCover(artist?.picUrl || artist?.img1v1Url, 2048),
       bio: text(artist?.briefDesc) || copy.artistBioEmpty,
@@ -59,6 +70,9 @@ export async function readCreator({ creatorID, tab = "videos", cursor = "", incl
       .map((al) => {
         const mapped = mapAlbumItem(al, copy.albumTag);
         if (!mapped) return undefined;
+        if (mapped.creator && !mapped.creator.avatarURL && resolvedAvatar) {
+          mapped.creator.avatarURL = resolvedAvatar;
+        }
         return {
           id: mapped.ref.id,
           title: mapped.title,
@@ -73,9 +87,18 @@ export async function readCreator({ creatorID, tab = "videos", cursor = "", incl
   }
 
   if (activeTab === "videos") {
-    const hotSongs = Array.isArray(artistBody?.hotSongs) ? artistBody.hotSongs : [];
-    out.items = page === 1 ? hotSongs.map((s) => mapSongItem(s)).filter(Boolean) : [];
-    out.nextCursor = "";
+    const pagedSongs = Array.isArray(songsBody?.songs) ? songsBody.songs : [];
+    const rawSongs = pagedSongs.length > 0 ? pagedSongs : page === 1 && Array.isArray(artistBody?.hotSongs) ? artistBody.hotSongs : [];
+    out.items = rawSongs
+      .map((s) => {
+        const item = mapSongItem(s);
+        if (item?.creator && item.creator.id === artistID && !item.creator.avatarURL && resolvedAvatar) {
+          item.creator.avatarURL = resolvedAvatar;
+        }
+        return item;
+      })
+      .filter(Boolean);
+    out.nextCursor = songsBody?.more && pagedSongs.length > 0 ? String(page + 1) : "";
   }
   return out;
 }

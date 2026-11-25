@@ -13,31 +13,93 @@ import {
 } from "./api.js";
 import { t } from "./i18n.js";
 
-function buildAccount(profile, accountInfo, fallback) {
+function hasActiveRight(pkg, now) {
+  if (!pkg || typeof pkg !== "object") return false;
+  if (pkg.rights !== true) return false;
+  const exp = Number(pkg.expireTime ?? 0);
+  return exp <= 0 || exp > now;
+}
+
+function resolveActiveVIP(vipData, profile, accountInfo) {
+  const now = Date.now();
+  if (vipData && typeof vipData === "object" && (vipData.associator || vipData.redplus || vipData.musicPackage)) {
+    return (
+      hasActiveRight(vipData.associator, now) ||
+      hasActiveRight(vipData.redplus, now) ||
+      hasActiveRight(vipData.musicPackage, now)
+    );
+  }
+  const rights = profile?.vipRights || accountInfo?.vipRights;
+  if (rights && typeof rights === "object") {
+    return (
+      hasActiveRight(rights.associator, now) ||
+      hasActiveRight(rights.redplus, now) ||
+      hasActiveRight(rights.musicPackage, now)
+    );
+  }
+  return false;
+}
+
+async function fetchVIPInfo(csrf = "") {
+  const attempts = [
+    () =>
+      eapiRequest(
+        "/api/music-vip-membership/client/vip/info",
+        {},
+        { allowCodes: [200] }
+      ),
+    () =>
+      weapiRequest(
+        "/weapi/music-vip-membership/front/vip/info",
+        {},
+        { csrf, allowCodes: [200] }
+      ),
+  ];
+  for (let i = 0; i < attempts.length; i++) {
+    try {
+      const body = await attempts[i]();
+      if (body?.data && typeof body.data === "object") {
+        return body.data;
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
+function buildAccount(profile, accountInfo, vipData, fallback) {
   const copy = t();
   const fb = fallback || {};
   const uid = positiveID(profile?.userId ?? accountInfo?.id ?? fb.uid);
   const name = text(profile?.nickname || accountInfo?.userName || fb.name) || copy.sourceName;
   const avatarURL = avatarCover(profile?.avatarUrl || fb.avatarURL, 256);
-  const vipType = Number(profile?.vipType ?? accountInfo?.vipType ?? 0);
-  const isVIP = vipType > 0;
+  const isVIP = resolveActiveVIP(vipData, profile, accountInfo);
 
   const account = {
     id: uid || "cloud-music-user",
     name,
     badge: { text: isVIP ? copy.vipBadge : copy.normalBadge, icon: isVIP ? "sparkles" : "user" },
     card: {
-      title: copy.sourceName,
-      description: copy.sourceDesc,
-      icon: isVIP ? "sparkles" : "play",
-      status: isVIP ? copy.vipBadge : copy.connected,
+      title: copy.vipBadge,
+      description: copy.vipCardDesc,
+      icon: isVIP ? "sparkles" : undefined,
+      status: isVIP ? copy.vipActive : copy.vipInactive,
       highlight: isVIP,
       benefits: [
-        copy.benefitPlaylists,
         copy.benefitLossless,
+        copy.benefitCatalog,
         copy.benefitLyrics,
-        copy.benefitBackground,
       ],
+      actionLabel: copy.vipActionLabel,
+      details: {
+        title: copy.vipDetailTitle,
+        kicker: copy.vipDetailKicker,
+        body: copy.vipDetailBody,
+        phoneAction: copy.vipPhoneAction,
+        phoneBody: copy.vipPhoneBody,
+        officialLabel: copy.vipOfficialLabel,
+        refreshAction: copy.vipRefreshAction,
+        dismissAction: copy.vipDismissAction,
+      },
     },
   };
   if (avatarURL) account.avatarURL = avatarURL;
@@ -139,24 +201,11 @@ export async function pollSignIn(req) {
     throw { code: "signIn", message: "No session cookies returned." };
   }
   const csrf = extractCookieValue(cookieMap, "__csrf");
-  let profile = null;
-  let accountInfo = null;
-  try {
-    const res = await fetchUserAccount(cookieMap, csrf);
-    profile = res.profile;
-    accountInfo = res.accountInfo;
-  } catch (err) {
-    // If MUSIC_U was already granted on 803, allow sign-in to complete with
-    // fallback identity rather than discarding a valid session on a transient check.
-    if (!cookieMap.MUSIC_U) {
-      throw err;
-    }
-  }
+  const { profile, accountInfo } = await fetchUserAccount(cookieMap, csrf);
+  const resolvedCSRF = extractCookieValue(cookieMap, "__csrf") || csrf;
+  const vipData = await fetchVIPInfo(resolvedCSRF);
   const finalHeaders = finalizeCookieHeaders(cookieMap);
-  const fallback = cookieMap.MUSIC_U
-    ? { uid: host.crypto.md5(extractCookieValue(cookieMap, "MUSIC_U")).slice(0, 12) }
-    : null;
-  const account = buildAccount(profile, accountInfo, fallback);
+  const account = buildAccount(profile, accountInfo, vipData, null);
   return {
     status: "approved",
     account,
@@ -164,7 +213,7 @@ export async function pollSignIn(req) {
       uid: account.id,
       name: account.name,
       avatarURL: account.avatarURL || "",
-      csrf: extractCookieValue(cookieMap, "__csrf") || csrf,
+      csrf: resolvedCSRF,
     },
     cookies: [{ url: MUSIC_ORIGIN, headers: finalHeaders }],
   };
@@ -173,8 +222,9 @@ export async function pollSignIn(req) {
 export async function restoreAccount(secret) {
   const cookieMap = {};
   const { profile, accountInfo } = await fetchUserAccount(cookieMap, text(secret?.csrf));
-  const account = buildAccount(profile, accountInfo, secret);
   const csrf = extractCookieValue(cookieMap, "__csrf") || text(secret?.csrf);
+  const vipData = await fetchVIPInfo(csrf);
+  const account = buildAccount(profile, accountInfo, vipData, secret);
   const out = {
     account,
     secret: {

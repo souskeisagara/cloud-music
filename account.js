@@ -1,4 +1,4 @@
-// User library: personal playlists (favorites folders with Play All) and play history.
+// User library: personal playlists (paginated) and instant recently-played history.
 
 import {
   count,
@@ -8,7 +8,8 @@ import {
   squareCover,
   text,
 } from "./api.js";
-import { fetchPlaylistTracks } from "./catalog.js";
+import { fetchPlaylistTracksPage, hydrateItemsArtistAvatars } from "./catalog.js";
+import { readLocalHistory } from "./playback.js";
 import { t } from "./i18n.js";
 
 function songToAccountRow(song) {
@@ -24,6 +25,18 @@ function songToAccountRow(song) {
     ref: mapped.ref,
     item: mapped,
   };
+}
+
+async function hydrateAccountRowsAvatars(rows) {
+  const items = rows.map((r) => r?.item).filter(Boolean);
+  await hydrateItemsArtistAvatars(items);
+  for (let i = 0; i < rows.length; i++) {
+    const av = rows[i]?.item?.creator?.avatarURL;
+    if (av && !rows[i].creatorAvatarURL) {
+      rows[i].creatorAvatarURL = av;
+    }
+  }
+  return rows;
 }
 
 async function readFavorites({ owner, folder = "", cursor = "", secret }) {
@@ -57,21 +70,28 @@ async function readFavorites({ owner, folder = "", cursor = "", secret }) {
         };
       })
       .filter(Boolean);
-    return {
+    const hasMore = Boolean(body?.more) && rows.length > 0;
+    const out = {
       rows,
-      total: rows.length,
-      nextCursor: body?.more && rows.length > 0 ? String(page + 1) : "",
+      nextCursor: hasMore ? String(page + 1) : "",
     };
+    if (!hasMore && page === 1) {
+      out.total = rows.length;
+    }
+    return out;
   }
 
   const playlistID = positiveID(folder);
   if (!playlistID) throw { code: "permission" };
-  const { playlist, tracks } = await fetchPlaylistTracks(playlistID, 100);
+  const pageSize = 40;
+  const offset = (page - 1) * pageSize;
+  const { playlist, tracks, total, hasMore } = await fetchPlaylistTracksPage(playlistID, offset, pageSize);
   const rows = tracks.map(songToAccountRow).filter(Boolean);
+  await hydrateAccountRowsAvatars(rows);
   return {
     rows,
-    total: count(playlist?.trackCount) ?? rows.length,
-    nextCursor: "",
+    total: count(playlist?.trackCount) ?? total ?? rows.length,
+    nextCursor: hasMore && rows.length > 0 ? String(page + 1) : "",
   };
 }
 
@@ -79,22 +99,50 @@ async function readHistory({ owner, secret }) {
   const uid = positiveID(owner || secret?.uid);
   if (!uid) throw { code: "signIn", message: t().signInRequired };
 
-  let records = [];
+  const merged = [];
+  const seen = new Set();
+  const pushRow = (row) => {
+    if (!row || !row.id || seen.has(row.id)) return;
+    seen.add(row.id);
+    merged.push(row);
+  };
+
+  // 1. Local instant play records from this Apple TV first (zero cloud delay).
+  const localRows = readLocalHistory();
+  for (let i = 0; i < localRows.length; i++) {
+    pushRow(localRows[i]);
+  }
+
+  // 2. Cloud chronological recent songs endpoint, falling back to play record rankings.
+  let cloudSongs = [];
   try {
-    const body = await eapiRequest("/api/v1/play/record", { uid: Number(uid), type: 1 });
-    records = Array.isArray(body?.weekData) ? body.weekData : [];
+    const recentRes = await eapiRequest("/api/record/recent/song", { limit: 60 });
+    const list = Array.isArray(recentRes?.data?.list) ? recentRes.data.list : [];
+    for (let i = 0; i < list.length; i++) {
+      if (list[i]?.data) cloudSongs.push(list[i].data);
+    }
   } catch (_) {}
-  if (records.length === 0) {
+
+  if (cloudSongs.length === 0) {
     try {
-      const body = await eapiRequest("/api/v1/play/record", { uid: Number(uid), type: 0 });
-      records = Array.isArray(body?.allData) ? body.allData : [];
+      const body = await eapiRequest("/api/v1/play/record", { uid: Number(uid), type: 1 });
+      const week = Array.isArray(body?.weekData) ? body.weekData : [];
+      for (let i = 0; i < week.length; i++) cloudSongs.push(week[i]?.song || week[i]);
     } catch (_) {}
   }
-  const rows = records
-    .slice(0, 50)
-    .map((entry) => songToAccountRow(entry?.song || entry))
-    .filter(Boolean);
-  return { rows, total: rows.length, nextCursor: "" };
+  if (cloudSongs.length === 0) {
+    try {
+      const body = await eapiRequest("/api/v1/play/record", { uid: Number(uid), type: 0 });
+      const all = Array.isArray(body?.allData) ? body.allData : [];
+      for (let i = 0; i < all.length; i++) cloudSongs.push(all[i]?.song || all[i]);
+    } catch (_) {}
+  }
+
+  for (let i = 0; i < cloudSongs.length && merged.length < 80; i++) {
+    pushRow(songToAccountRow(cloudSongs[i]));
+  }
+  await hydrateAccountRowsAvatars(merged);
+  return { rows: merged, total: merged.length, nextCursor: "" };
 }
 
 export async function readAccount(input = {}) {

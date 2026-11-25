@@ -10,7 +10,7 @@ import {
   positiveID,
   text,
 } from "./api.js";
-import { fetchPlaylistTracks } from "./catalog.js";
+import { fetchPlaylistTracksPage, hydrateCreatorsAvatars, hydrateItemsArtistAvatars } from "./catalog.js";
 import { t } from "./i18n.js";
 
 const SUPPORTED_KINDS = ["all", "video", "creator", "series"];
@@ -71,7 +71,7 @@ async function discovery(kind, page) {
     };
   }
 
-  const { tracks } = await fetchPlaylistTracks("3778678", 30);
+  const { tracks, hasMore } = await fetchPlaylistTracksPage("3778678", (page - 1) * PAGE_SIZE, PAGE_SIZE);
   if (kind === "creator") {
     const seen = new Set();
     const creators = [];
@@ -83,18 +83,21 @@ async function discovery(kind, page) {
         creators.push(mapped);
       }
     }
+    const pageCreators = creators.slice(0, PAGE_SIZE);
+    await hydrateCreatorsAvatars(pageCreators);
     return {
-      creators: page === 1 ? creators.slice(0, 20) : [],
-      nextCursor: "",
+      creators: pageCreators,
+      nextCursor: hasMore && pageCreators.length > 0 ? String(page + 1) : "",
       hotKeywords: hot,
       kinds: SUPPORTED_KINDS,
     };
   }
 
-  const items = page === 1 ? tracks.map((s) => mapSongItem(s)).filter(Boolean) : [];
+  const items = tracks.map((s) => mapSongItem(s)).filter(Boolean);
+  await hydrateItemsArtistAvatars(items);
   return {
     items,
-    nextCursor: "",
+    nextCursor: hasMore && items.length > 0 ? String(page + 1) : "",
     hotKeywords: hot,
     kinds: SUPPORTED_KINDS,
   };
@@ -120,6 +123,7 @@ export async function search({ query = "", kind = "all", cursor = "" } = {}) {
     });
     const artists = Array.isArray(body?.result?.artists) ? body.result.artists : [];
     const creators = artists.map(mapArtistCreator).filter(Boolean);
+    await hydrateCreatorsAvatars(creators);
     const total = count(body?.result?.artistCount) ?? creators.length;
     return {
       creators,
@@ -169,6 +173,7 @@ export async function search({ query = "", kind = "all", cursor = "" } = {}) {
   });
   const songs = Array.isArray(body?.result?.songs) ? body.result.songs : [];
   const items = songs.map((s) => mapSongItem(s)).filter(Boolean);
+  await hydrateItemsArtistAvatars(items);
   const total = count(body?.result?.songCount) ?? items.length;
   return {
     items,
